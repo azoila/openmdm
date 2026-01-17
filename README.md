@@ -257,7 +257,9 @@ export const { GET, POST, PUT, DELETE } = nextjsHandler(mdm);
 
 ## Android Agent
 
-The Android Agent app is included in `apps/android-agent/`. Built with Kotlin and Jetpack Compose.
+The Android Agent is maintained in a separate repository for easier customization and forking:
+
+**Repository**: [openmdm/openmdm-android](https://github.com/openmdm/openmdm-android)
 
 ### Features
 
@@ -265,16 +267,26 @@ The Android Agent app is included in `apps/android-agent/`. Built with Kotlin an
 - FCM push notification support
 - Automatic heartbeat/check-in scheduling
 - Command processing (sync, lock, wipe, app install, etc.)
-- Device administrator capabilities
+- Device Owner / Device Admin capabilities
+- Silent app installation and permission granting
 - Kiosk mode support
 - Location reporting
 
-### Building the Agent
+### Getting Started
 
 ```bash
-cd apps/android-agent
-./gradlew assembleRelease
+# Clone the Android agent
+git clone https://github.com/openmdm/openmdm-android
+
+# Build the full agent app
+cd openmdm-android
+./gradlew :agent:assembleRelease
+
+# Or use the library in your own app
+implementation("com.github.openmdm:openmdm-android:library:0.1.0")
 ```
+
+See the [openmdm-android README](https://github.com/openmdm/openmdm-android) for full documentation.
 
 ## Push Notification Providers
 
@@ -376,26 +388,28 @@ npx openmdm stats
 ## Project Structure
 
 ```
-openmdm/
+openmdm/                          # This repository (SDK monorepo)
 ├── packages/
-│   ├── core/                 # Core MDM SDK
-│   ├── storage/
-│   │   └── s3/               # S3 storage adapter
+│   ├── core/                     # Core MDM SDK
+│   ├── storage/s3/               # S3 storage adapter
 │   ├── adapters/
-│   │   ├── drizzle/          # Drizzle ORM adapter
-│   │   └── hono/             # Hono framework adapter
+│   │   ├── drizzle/              # Drizzle ORM adapter
+│   │   └── hono/                 # Hono framework adapter
 │   ├── push/
-│   │   ├── fcm/              # FCM push adapter
-│   │   └── mqtt/             # MQTT push adapter
+│   │   ├── fcm/                  # FCM push adapter
+│   │   └── mqtt/                 # MQTT push adapter
 │   ├── plugins/
-│   │   ├── kiosk/            # Kiosk mode plugin
-│   │   └── geofence/         # Geofencing plugin
-│   ├── client/               # Device-side SDK
-│   └── cli/                  # CLI tools
-├── apps/
-│   └── android-agent/        # Android Agent app (Kotlin)
-├── examples/                 # Example applications
-└── docs/                     # Documentation
+│   │   ├── kiosk/                # Kiosk mode plugin
+│   │   └── geofence/             # Geofencing plugin
+│   ├── client/                   # Device-side SDK (TypeScript types)
+│   └── cli/                      # CLI tools
+├── examples/                     # Example applications
+└── docs/                         # Documentation website
+
+openmdm-android/                  # Separate repository
+├── agent/                        # Full-featured MDM agent app
+├── library/                      # Core MDM library (embeddable)
+└── docs/                         # Android-specific docs
 ```
 
 ## Comparison
@@ -451,7 +465,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 - [API Reference](https://openmdm.dev/docs/api)
 - [Architecture & Design](./docs/MDM-ANALYSIS-AND-ARCHITECTURE.md)
 - [Migration from Headwind](./docs/migration-headwind.md)
-- [Android Agent Setup](./apps/android-agent/README.md)
+- [Android Agent Setup](https://github.com/openmdm/openmdm-android)
 
 ## License
 

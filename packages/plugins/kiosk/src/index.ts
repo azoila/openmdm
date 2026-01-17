@@ -456,8 +456,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
       handler: async (context: any) => {
         const kioskDevices = Array.from(kioskStates.entries())
           .filter(([_, state]) => state.enabled)
-          .map(([deviceId, state]) => ({
-            deviceId,
+          .map(([_, state]) => ({
             ...state,
             lockedSince: state.lockedSince?.toISOString(),
           }));

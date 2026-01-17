@@ -224,9 +224,17 @@ export function honoAdapter(
       // Return pending commands for the device
       const pendingCommands = await mdm.commands.getPending(deviceId);
 
+      // Get current policy if device has one
+      const device = await mdm.devices.get(deviceId);
+      let policyUpdate = null;
+      if (device?.policyId) {
+        policyUpdate = await mdm.policies.get(device.policyId);
+      }
+
       return c.json({
-        status: 'ok',
-        commands: pendingCommands,
+        success: true,
+        pendingCommands: pendingCommands,
+        policyUpdate: policyUpdate,
       });
     });
 
