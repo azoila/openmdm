@@ -2,6 +2,7 @@
   "name": "@openmdm/cli",
   "version": "0.1.0",
   "description": "CLI tools for OpenMDM - database migrations, admin commands, and device management",
+  "author": "OpenMDM Contributors",
   "type": "module",
   "bin": {
     "openmdm": "./dist/index.js"
@@ -39,5 +40,17 @@
     "mdm",
     "admin"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/azoila/openmdm.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://openmdm.dev",
+  "bugs": {
+    "url": "https://github.com/azoila/openmdm/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

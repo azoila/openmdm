@@ -20,7 +20,7 @@
  * ```
  */
 
-import { eq, and, or, like, inArray, desc, sql, isNull } from 'drizzle-orm';
+import { eq, and, or, like, inArray, desc, sql, isNull, type SQL } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type {
   DatabaseAdapter,
@@ -255,7 +255,7 @@ export function drizzleAdapter(
       let query = (db as any).select().from(devices);
 
       // Build WHERE conditions
-      const conditions: unknown[] = [];
+      const conditions: (SQL | undefined)[] = [];
 
       if (filter?.status) {
         if (Array.isArray(filter.status)) {
@@ -577,7 +577,7 @@ export function drizzleAdapter(
     async listCommands(filter?: CommandFilter): Promise<Command[]> {
       let query = (db as any).select().from(commands);
 
-      const conditions: unknown[] = [];
+      const conditions: (SQL | undefined)[] = [];
 
       if (filter?.deviceId) {
         conditions.push(eq(commands.deviceId, filter.deviceId));
@@ -688,7 +688,7 @@ export function drizzleAdapter(
     async listEvents(filter?: EventFilter): Promise<MDMEvent[]> {
       let query = (db as any).select().from(events);
 
-      const conditions: unknown[] = [];
+      const conditions: (SQL | undefined)[] = [];
 
       if (filter?.deviceId) {
         conditions.push(eq(events.deviceId, filter.deviceId));
