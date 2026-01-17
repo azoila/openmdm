@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Device-side client SDK for OpenMDM - for Android agents and other device clients",
   "author": "OpenMDM Contributors",
   "type": "module",

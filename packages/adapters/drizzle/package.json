@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/drizzle-adapter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drizzle ORM adapter for OpenMDM",
   "author": "OpenMDM Contributors",
   "type": "module",
