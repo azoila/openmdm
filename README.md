@@ -18,6 +18,10 @@
 
 </div>
 
+> [!CAUTION]
+> **This project is under active development and is NOT ready for production use.**
+> APIs may change without notice. Use at your own risk. We welcome contributions and feedback!
+
 ## Why OpenMDM?
 
 ### The Problem with Existing Solutions
