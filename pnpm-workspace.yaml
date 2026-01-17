@@ -1,4 +1,9 @@
 packages:
   - "packages/*"
   - "packages/adapters/*"
+  - "packages/storage/*"
+  - "packages/push/*"
+  - "packages/plugins/*"
   - "examples/*"
+  - "apps/*"
+  - "docs"

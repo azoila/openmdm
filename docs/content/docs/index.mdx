@@ -1,0 +1,84 @@
+---
+title: Introduction
+description: OpenMDM is a modern, embeddable MDM SDK for Android devices.
+---
+
+# Introduction
+
+OpenMDM is a modern, open-source Mobile Device Management (MDM) SDK designed for developers who need enterprise-grade device management capabilities without the complexity of traditional MDM solutions.
+
+## What is OpenMDM?
+
+OpenMDM provides a complete toolkit for managing Android devices at scale. It's designed to be:
+
+- **Embeddable**: Integrate MDM capabilities directly into your existing applications
+- **Developer-friendly**: Clean TypeScript APIs with comprehensive documentation
+- **Flexible**: Use only the features you need with a modular plugin architecture
+- **Open Source**: MIT licensed and community-driven
+
+## Key Features
+
+### Device Enrollment
+
+Easily enroll devices using QR codes, NFC, or zero-touch enrollment. OpenMDM supports multiple enrollment methods to fit your deployment scenario.
+
+### Policy Management
+
+Define and enforce device policies including:
+
+- App allowlists and blocklists
+- Network and WiFi configuration
+- Security requirements (passwords, encryption)
+- System settings restrictions
+
+### Remote Commands
+
+Execute commands on enrolled devices:
+
+- Lock and unlock devices
+- Wipe device data
+- Install and uninstall applications
+- Reboot devices
+
+### Kiosk Mode
+
+Lock devices to specific applications for dedicated-use scenarios like:
+
+- Retail point-of-sale
+- Digital signage
+- Field service applications
+- Educational devices
+
+## Architecture
+
+OpenMDM follows a modular architecture with three main components:
+
+1. **Core SDK** (`@openmdm/core`): The main server-side SDK that handles device management logic
+2. **Storage Adapters**: Pluggable storage backends (SQLite, PostgreSQL, etc.)
+3. **Push Providers**: Integration with push notification services (FCM, HMS)
+
+## Quick Start
+
+```bash
+npm install @openmdm/core @openmdm/storage-sqlite @openmdm/push-fcm
+```
+
+```typescript
+import { createMDMServer } from '@openmdm/core';
+import { sqliteStorage } from '@openmdm/storage-sqlite';
+import { fcmPush } from '@openmdm/push-fcm';
+
+const mdm = createMDMServer({
+  storage: sqliteStorage({ filename: './mdm.db' }),
+  push: fcmPush({ projectId: 'your-project-id' }),
+});
+
+// Start managing devices
+const devices = await mdm.devices.list();
+```
+
+## Next Steps
+
+- [Installation](/docs/installation) - Set up OpenMDM in your project
+- [Quick Start](/docs/quick-start) - Get up and running in minutes
+- [Core Concepts](/docs/concepts) - Understand how OpenMDM works

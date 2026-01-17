@@ -27,7 +27,8 @@
     "packages/adapters/*",
     "packages/plugins/*",
     "examples/*",
-    "apps/*"
+    "apps/*",
+    "docs"
   ],
   "scripts": {
     "build": "turbo build",

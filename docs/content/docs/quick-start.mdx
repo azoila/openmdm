@@ -1,0 +1,202 @@
+---
+title: Quick Start
+description: Get up and running with OpenMDM in minutes.
+---
+
+# Quick Start
+
+This guide will walk you through creating your first MDM server and enrolling a device.
+
+## 1. Create the MDM Server
+
+First, set up your MDM server instance:
+
+```typescript title="src/mdm.ts"
+import { createMDMServer } from '@openmdm/core';
+import { sqliteStorage } from '@openmdm/storage-sqlite';
+import { fcmPush } from '@openmdm/push-fcm';
+
+export const mdm = createMDMServer({
+  storage: sqliteStorage({ filename: './mdm.db' }),
+  push: fcmPush({
+    projectId: process.env.FIREBASE_PROJECT_ID!
+  }),
+});
+```
+
+## 2. Create an Enrollment Token
+
+Generate an enrollment token that devices will use to register:
+
+```typescript
+const token = await mdm.enrollment.createToken({
+  // Token expires in 24 hours
+  expiresIn: '24h',
+
+  // Optional: Pre-assign a policy
+  policyId: 'default-policy',
+
+  // Optional: Limit number of enrollments
+  maxEnrollments: 10,
+});
+
+console.log('Enrollment Token:', token.value);
+console.log('QR Code URL:', token.qrCodeUrl);
+```
+
+## 3. Enroll a Device
+
+When a device scans the QR code or enters the token, it will be enrolled:
+
+```typescript
+// This happens automatically when the device agent connects
+const device = await mdm.devices.enroll({
+  enrollmentToken: 'your-token-here',
+  deviceInfo: {
+    manufacturer: 'Samsung',
+    model: 'Galaxy S24',
+    osVersion: '14',
+    serialNumber: 'ABC123',
+  },
+});
+
+console.log('Device enrolled:', device.id);
+```
+
+## 4. Apply a Policy
+
+Create and apply a policy to manage the device:
+
+```typescript
+// Create a policy
+const policy = await mdm.policies.create({
+  name: 'Kiosk Policy',
+  settings: {
+    kioskMode: {
+      enabled: true,
+      allowedApps: ['com.example.kioskapp'],
+    },
+    security: {
+      requirePassword: true,
+      minPasswordLength: 6,
+    },
+    restrictions: {
+      allowCamera: false,
+      allowScreenCapture: false,
+    },
+  },
+});
+
+// Apply to the device
+await mdm.devices.applyPolicy(device.id, policy.id);
+```
+
+## 5. Send Commands
+
+Execute remote commands on the device:
+
+```typescript
+// Lock the device
+await mdm.commands.send(device.id, {
+  type: 'LOCK',
+  message: 'This device has been locked by IT.',
+});
+
+// Install an app
+await mdm.commands.send(device.id, {
+  type: 'INSTALL_APP',
+  packageName: 'com.example.app',
+  downloadUrl: 'https://example.com/app.apk',
+});
+
+// Reboot the device
+await mdm.commands.send(device.id, {
+  type: 'REBOOT',
+});
+```
+
+## 6. Monitor Devices
+
+Query device status and information:
+
+```typescript
+// List all devices
+const devices = await mdm.devices.list({
+  status: 'online',
+  limit: 50,
+});
+
+// Get device details
+const device = await mdm.devices.get('device-id');
+console.log('Last seen:', device.lastSeen);
+console.log('Battery:', device.batteryLevel);
+console.log('Policy:', device.policyId);
+
+// Get device location (if enabled)
+const location = await mdm.devices.getLocation('device-id');
+console.log('Location:', location.latitude, location.longitude);
+```
+
+## Complete Example
+
+Here's a complete example integrating with an Express server:
+
+```typescript title="src/index.ts"
+import express from 'express';
+import { mdm } from './mdm';
+
+const app = express();
+app.use(express.json());
+
+// Create enrollment token
+app.post('/api/enrollment/token', async (req, res) => {
+  const token = await mdm.enrollment.createToken({
+    expiresIn: '24h',
+  });
+  res.json(token);
+});
+
+// List devices
+app.get('/api/devices', async (req, res) => {
+  const devices = await mdm.devices.list();
+  res.json(devices);
+});
+
+// Send command to device
+app.post('/api/devices/:id/commands', async (req, res) => {
+  const { id } = req.params;
+  const command = req.body;
+
+  await mdm.commands.send(id, command);
+  res.json({ success: true });
+});
+
+// MDM webhook for device events
+app.post('/api/mdm/webhook', async (req, res) => {
+  const event = req.body;
+
+  switch (event.type) {
+    case 'device.enrolled':
+      console.log('New device enrolled:', event.deviceId);
+      break;
+    case 'device.policy_applied':
+      console.log('Policy applied:', event.policyId);
+      break;
+    case 'command.completed':
+      console.log('Command completed:', event.commandId);
+      break;
+  }
+
+  res.json({ received: true });
+});
+
+app.listen(3000, () => {
+  console.log('MDM server running on http://localhost:3000');
+});
+```
+
+## Next Steps
+
+- [Policies](/docs/policies) - Learn about policy configuration
+- [Commands](/docs/commands) - Explore available device commands
+- [Webhooks](/docs/webhooks) - Set up event notifications

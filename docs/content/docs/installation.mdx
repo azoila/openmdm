@@ -1,0 +1,94 @@
+---
+title: Installation
+description: Learn how to install and set up OpenMDM in your project.
+---
+
+# Installation
+
+This guide will help you install OpenMDM and its dependencies.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- Node.js 20 or later
+- npm, yarn, or pnpm
+- A Firebase project (for FCM push notifications)
+
+## Install Packages
+
+Install the core package and your preferred storage/push adapters:
+
+```bash
+# Using npm
+npm install @openmdm/core @openmdm/storage-sqlite @openmdm/push-fcm
+
+# Using yarn
+yarn add @openmdm/core @openmdm/storage-sqlite @openmdm/push-fcm
+
+# Using pnpm
+pnpm add @openmdm/core @openmdm/storage-sqlite @openmdm/push-fcm
+```
+
+## Available Packages
+
+### Core
+
+| Package | Description |
+|---------|-------------|
+| `@openmdm/core` | Core MDM server SDK |
+
+### Storage Adapters
+
+| Package | Description |
+|---------|-------------|
+| `@openmdm/storage-sqlite` | SQLite storage adapter |
+| `@openmdm/storage-postgres` | PostgreSQL storage adapter |
+| `@openmdm/storage-memory` | In-memory storage (for testing) |
+
+### Push Providers
+
+| Package | Description |
+|---------|-------------|
+| `@openmdm/push-fcm` | Firebase Cloud Messaging |
+| `@openmdm/push-hms` | Huawei Mobile Services |
+
+## Basic Setup
+
+Create a new file for your MDM server:
+
+```typescript title="mdm-server.ts"
+import { createMDMServer } from '@openmdm/core';
+import { sqliteStorage } from '@openmdm/storage-sqlite';
+import { fcmPush } from '@openmdm/push-fcm';
+
+export const mdm = createMDMServer({
+  // Storage configuration
+  storage: sqliteStorage({
+    filename: './data/mdm.db',
+  }),
+
+  // Push notification configuration
+  push: fcmPush({
+    projectId: process.env.FIREBASE_PROJECT_ID!,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY!,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL!,
+  }),
+});
+```
+
+## Environment Variables
+
+Create a `.env` file with your configuration:
+
+```bash title=".env"
+# Firebase Configuration
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com
+```
+
+## Next Steps
+
+- [Quick Start](/docs/quick-start) - Create your first device enrollment
+- [Configuration](/docs/configuration) - Learn about all configuration options
