@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/storage-s3",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "S3 storage adapter for OpenMDM - APK uploads with presigned URLs",
   "author": "OpenMDM Contributors",
   "type": "module",
