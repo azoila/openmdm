@@ -2,7 +2,9 @@
   "name": "@openmdm/storage-s3",
   "version": "0.1.0",
   "description": "S3 storage adapter for OpenMDM - APK uploads with presigned URLs",
+  "author": "OpenMDM Contributors",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -40,5 +42,17 @@
     "apk",
     "upload"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/azoila/openmdm.git",
+    "directory": "packages/storage/s3"
+  },
+  "homepage": "https://openmdm.dev",
+  "bugs": {
+    "url": "https://github.com/azoila/openmdm/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

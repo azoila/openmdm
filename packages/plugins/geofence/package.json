@@ -2,7 +2,9 @@
   "name": "@openmdm/plugin-geofence",
   "version": "0.1.0",
   "description": "Geofencing plugin for OpenMDM - location-based policy enforcement for Android devices",
+  "author": "OpenMDM Contributors",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -36,5 +38,17 @@
     "gps",
     "mdm"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/azoila/openmdm.git",
+    "directory": "packages/plugins/geofence"
+  },
+  "homepage": "https://openmdm.dev",
+  "bugs": {
+    "url": "https://github.com/azoila/openmdm/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -2,7 +2,9 @@
   "name": "@openmdm/client",
   "version": "0.1.0",
   "description": "Device-side client SDK for OpenMDM - for Android agents and other device clients",
+  "author": "OpenMDM Contributors",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -35,5 +37,17 @@
     "android",
     "device-management"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/azoila/openmdm.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://openmdm.dev",
+  "bugs": {
+    "url": "https://github.com/azoila/openmdm/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

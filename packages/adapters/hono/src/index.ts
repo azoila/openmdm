@@ -10,7 +10,7 @@
  * import { honoAdapter } from '@openmdm/hono';
  *
  * const mdm = createMDM({ ... });
- * const app = new Hono();
+ * const app = new Hono<MDMEnv>();
  *
  * // Mount MDM routes
  * app.route('/mdm', honoAdapter(mdm));
@@ -19,7 +19,7 @@
 
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import type { Context, MiddlewareHandler } from 'hono';
+import type { Context, MiddlewareHandler, Env } from 'hono';
 import type {
   MDMInstance,
   EnrollmentRequest,
@@ -37,6 +37,21 @@ import type {
   AuthenticationError,
   AuthorizationError,
 } from '@openmdm/core';
+
+/**
+ * Context variables set by OpenMDM middlewares
+ */
+interface MDMVariables {
+  deviceId?: string;
+  user?: unknown;
+}
+
+/**
+ * Hono environment type for OpenMDM routes
+ */
+type MDMEnv = {
+  Variables: MDMVariables;
+};
 
 export interface HonoAdapterOptions {
   /**
@@ -74,8 +89,8 @@ export interface HonoAdapterOptions {
 export function honoAdapter(
   mdm: MDMInstance,
   options: HonoAdapterOptions = {}
-): Hono {
-  const app = new Hono();
+): Hono<MDMEnv> {
+  const app = new Hono<MDMEnv>();
 
   const routes = {
     enrollment: true,
@@ -165,7 +180,7 @@ export function honoAdapter(
   // ============================================
 
   if (routes.enrollment) {
-    const enrollment = new Hono();
+    const enrollment = new Hono<MDMEnv>();
 
     // Enroll device
     enrollment.post('/enroll', async (c) => {
@@ -286,7 +301,7 @@ export function honoAdapter(
   // ============================================
 
   if (routes.devices) {
-    const devices = new Hono();
+    const devices = new Hono<MDMEnv>();
 
     if (options.enableAuth) {
       devices.use('/*', adminAuth);
@@ -376,15 +391,15 @@ export function honoAdapter(
 
     // Convenience: Lock device
     devices.post('/:id/lock', async (c) => {
-      const { message } = await c.req.json<{ message?: string }>().catch(() => ({}));
-      const command = await mdm.devices.lock(c.req.param('id'), message);
+      const body = await c.req.json<{ message?: string }>().catch(() => ({ message: undefined }));
+      const command = await mdm.devices.lock(c.req.param('id'), body.message);
       return c.json(command, 201);
     });
 
     // Convenience: Wipe device
     devices.post('/:id/wipe', async (c) => {
-      const { preserveData } = await c.req.json<{ preserveData?: boolean }>().catch(() => ({}));
-      const command = await mdm.devices.wipe(c.req.param('id'), preserveData);
+      const body = await c.req.json<{ preserveData?: boolean }>().catch(() => ({ preserveData: undefined }));
+      const command = await mdm.devices.wipe(c.req.param('id'), body.preserveData);
       return c.json(command, 201);
     });
 
@@ -396,7 +411,7 @@ export function honoAdapter(
   // ============================================
 
   if (routes.policies) {
-    const policies = new Hono();
+    const policies = new Hono<MDMEnv>();
 
     if (options.enableAuth) {
       policies.use('/*', adminAuth);
@@ -466,7 +481,7 @@ export function honoAdapter(
   // ============================================
 
   if (routes.applications) {
-    const applications = new Hono();
+    const applications = new Hono<MDMEnv>();
 
     if (options.enableAuth) {
       applications.use('/*', adminAuth);
@@ -569,7 +584,7 @@ export function honoAdapter(
   // ============================================
 
   if (routes.groups) {
-    const groups = new Hono();
+    const groups = new Hono<MDMEnv>();
 
     if (options.enableAuth) {
       groups.use('/*', adminAuth);
@@ -643,7 +658,7 @@ export function honoAdapter(
   // ============================================
 
   if (routes.commands) {
-    const commands = new Hono();
+    const commands = new Hono<MDMEnv>();
 
     if (options.enableAuth) {
       commands.use('/*', adminAuth);
@@ -693,7 +708,7 @@ export function honoAdapter(
   // ============================================
 
   if (routes.events) {
-    const events = new Hono();
+    const events = new Hono<MDMEnv>();
 
     if (options.enableAuth) {
       events.use('/*', adminAuth);
@@ -729,6 +744,3 @@ export function honoAdapter(
 
   return app;
 }
-
-// Re-export types for convenience
-export type { HonoAdapterOptions };
