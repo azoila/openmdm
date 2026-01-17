@@ -7,6 +7,7 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
   const devices = new Map<string, Device>();
   const policies = new Map<string, Policy>();
   const commands = new Map<string, Command>();
+  let idCounter = 0;
 
   return {
     // Devices
@@ -26,7 +27,7 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
     },
     async createDevice(data) {
       const device: Device = {
-        id: `device_${Date.now()}`,
+        id: `device_${++idCounter}`,
         enrollmentId: data.enrollmentId,
         status: 'enrolled',
         model: data.model,
@@ -66,7 +67,7 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
     },
     async createPolicy(data) {
       const policy: Policy = {
-        id: `policy_${Date.now()}`,
+        id: `policy_${++idCounter}`,
         name: data.name,
         description: data.description,
         isDefault: data.isDefault || false,
@@ -105,7 +106,7 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
     },
     async createCommand(data) {
       const command: Command = {
-        id: `cmd_${Date.now()}`,
+        id: `cmd_${++idCounter}`,
         deviceId: data.deviceId,
         type: data.type,
         payload: data.payload,
@@ -123,8 +124,9 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
       return updated;
     },
     async getPendingCommands(deviceId: string) {
+      // Include 'pending' and 'sent' - both are awaiting device acknowledgment
       return Array.from(commands.values()).filter(
-        c => c.deviceId === deviceId && c.status === 'pending'
+        c => c.deviceId === deviceId && (c.status === 'pending' || c.status === 'sent')
       );
     },
 
@@ -320,7 +322,8 @@ describe('createMDM', () => {
       expect(command).toBeDefined();
       expect(command.deviceId).toBe(device.id);
       expect(command.type).toBe('sync');
-      expect(command.status).toBe('pending');
+      // Status is 'sent' because push adapter successfully delivered the notification
+      expect(command.status).toBe('sent');
     });
 
     it('should acknowledge a command', async () => {
