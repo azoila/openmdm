@@ -1,0 +1,22 @@
+# These owners will be the default owners for everything in the repo.
+# Unless a later match takes precedence, @azoila will be requested for
+# review when someone opens a pull request.
+
+* @azoila
+
+# Core packages
+/packages/core/ @azoila
+/packages/storage/ @azoila
+/packages/push/ @azoila
+/packages/adapters/ @azoila
+/packages/plugins/ @azoila
+
+# Android Agent
+/apps/android-agent/ @azoila
+
+# Documentation
+/docs/ @azoila
+*.md @azoila
+
+# CI/CD
+/.github/ @azoila

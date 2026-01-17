@@ -1,0 +1,118 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the form below.
+
+  - type: checkboxes
+    id: existing-issue
+    attributes:
+      label: Is there an existing issue for this?
+      description: Please search to see if an issue already exists for the bug you encountered.
+      options:
+        - label: I have searched the existing issues
+          required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      description: Which package is affected?
+      options:
+        - "@openmdm/core"
+        - "@openmdm/storage-s3"
+        - "@openmdm/drizzle-adapter"
+        - "@openmdm/hono"
+        - "@openmdm/push-fcm"
+        - "@openmdm/push-mqtt"
+        - "@openmdm/plugin-kiosk"
+        - "@openmdm/plugin-geofence"
+        - "@openmdm/client"
+        - "@openmdm/cli"
+        - "Android Agent"
+        - "Other/Multiple"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+      placeholder: Tell us what happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Create MDM instance with '...'
+        2. Call method '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: Code Example
+      description: If applicable, provide a minimal code example that reproduces the issue.
+      render: typescript
+      placeholder: |
+        import { createMDM } from '@openmdm/core';
+
+        const mdm = createMDM({
+          // ...
+        });
+
+        // Code that triggers the bug
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Please provide your environment details.
+      value: |
+        - OS: [e.g., macOS 14.0, Ubuntu 22.04, Windows 11]
+        - Node.js: [e.g., 20.10.0]
+        - Package Manager: [e.g., pnpm 9.0.0]
+        - Package Version: [e.g., @openmdm/core 0.1.0]
+        - Database: [e.g., PostgreSQL 16, SQLite]
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: If applicable, add error logs or stack traces.
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here.

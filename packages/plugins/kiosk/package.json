@@ -1,0 +1,40 @@
+{
+  "name": "@openmdm/plugin-kiosk",
+  "version": "0.1.0",
+  "description": "Kiosk mode plugin for OpenMDM - single-app lock down mode for Android devices",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@openmdm/core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0"
+  },
+  "keywords": [
+    "openmdm",
+    "kiosk",
+    "lockdown",
+    "single-app",
+    "mdm"
+  ],
+  "license": "MIT"
+}

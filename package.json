@@ -1,0 +1,38 @@
+{
+  "name": "openmdm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A modern, embeddable MDM (Mobile Device Management) SDK",
+  "keywords": [
+    "mdm",
+    "mobile-device-management",
+    "android",
+    "enterprise",
+    "kiosk",
+    "device-management"
+  ],
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "packages/storage/*",
+    "packages/push/*",
+    "examples/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "lint": "turbo lint",
+    "test": "turbo test",
+    "typecheck": "turbo typecheck",
+    "clean": "turbo clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.5.0"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

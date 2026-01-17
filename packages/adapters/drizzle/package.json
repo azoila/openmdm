@@ -1,0 +1,61 @@
+{
+  "name": "@openmdm/drizzle-adapter",
+  "version": "0.1.0",
+  "description": "Drizzle ORM adapter for OpenMDM",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.js"
+    },
+    "./postgres": {
+      "types": "./dist/postgres.d.ts",
+      "import": "./dist/postgres.js"
+    },
+    "./mysql": {
+      "types": "./dist/mysql.d.ts",
+      "import": "./dist/mysql.js"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite.d.ts",
+      "import": "./dist/sqlite.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@openmdm/core": "workspace:*",
+    "nanoid": "^5.0.0"
+  },
+  "devDependencies": {
+    "drizzle-orm": "^0.38.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": ">=0.30.0"
+  },
+  "keywords": [
+    "openmdm",
+    "drizzle",
+    "orm",
+    "adapter",
+    "database"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,142 @@
+# ============================================
+# Dependencies
+# ============================================
+node_modules/
+.pnpm-store/
+
+# ============================================
+# Build outputs
+# ============================================
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ============================================
+# Environment & Secrets
+# ============================================
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+*.pem
+*.key
+*.p12
+firebase-service-account.json
+google-services.json
+
+# ============================================
+# IDE & Editor
+# ============================================
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============================================
+# Testing & Coverage
+# ============================================
+coverage/
+.nyc_output/
+*.lcov
+
+# ============================================
+# Logs
+# ============================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ============================================
+# Turborepo
+# ============================================
+.turbo/
+
+# ============================================
+# Package managers
+# ============================================
+.npm/
+.yarn/
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# ============================================
+# Android
+# ============================================
+# Gradle
+apps/android-agent/.gradle/
+apps/android-agent/build/
+apps/android-agent/app/build/
+apps/android-agent/local.properties
+apps/android-agent/*.iml
+apps/android-agent/.idea/
+
+# Generated files
+apps/android-agent/app/src/main/assets/
+*.apk
+*.aab
+*.dex
+*.class
+
+# Android Studio Navigation editor temp files
+.navigation/
+
+# Signing
+*.jks
+*.keystore
+signing.properties
+
+# ============================================
+# Misc
+# ============================================
+*.local
+.cache/
+tmp/
+temp/
+
+# Debug
+*.stackdump
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Stores VSCode versions used for testing
+.vscode-test
+
+# ============================================
+# Documentation build
+# ============================================
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
+# ============================================
+# Claude Code
+# ============================================
+.claude/

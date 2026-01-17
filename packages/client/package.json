@@ -1,0 +1,39 @@
+{
+  "name": "@openmdm/client",
+  "version": "0.1.0",
+  "description": "Device-side client SDK for OpenMDM - for Android agents and other device clients",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0"
+  },
+  "keywords": [
+    "openmdm",
+    "mdm",
+    "client",
+    "android",
+    "device-management"
+  ],
+  "license": "MIT"
+}

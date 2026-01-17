@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://openmdm.dev/docs
+    about: Check our documentation for guides and API reference
+  - name: Discord Community
+    url: https://discord.gg/openmdm
+    about: Ask questions and get help from the community
+  - name: GitHub Discussions
+    url: https://github.com/azoila/openmdm/discussions
+    about: Ask questions and share ideas
+  - name: Security Vulnerability
+    url: https://github.com/azoila/openmdm/security/policy
+    about: Report security vulnerabilities privately

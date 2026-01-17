@@ -1,0 +1,40 @@
+{
+  "name": "@openmdm/plugin-geofence",
+  "version": "0.1.0",
+  "description": "Geofencing plugin for OpenMDM - location-based policy enforcement for Android devices",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@openmdm/core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0"
+  },
+  "keywords": [
+    "openmdm",
+    "geofence",
+    "location",
+    "gps",
+    "mdm"
+  ],
+  "license": "MIT"
+}
