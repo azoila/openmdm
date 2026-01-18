@@ -18,6 +18,15 @@
  * - mdm_rollbacks: Rollback operation history and status
  * - mdm_webhook_endpoints: Outbound webhook configuration
  * - mdm_webhook_deliveries: Webhook delivery history
+ * - mdm_tenants: Multi-tenant organization isolation
+ * - mdm_roles: RBAC role definitions
+ * - mdm_users: User accounts for authorization
+ * - mdm_user_roles: User-role mapping
+ * - mdm_audit_logs: Compliance and audit trail
+ * - mdm_scheduled_tasks: Scheduled task definitions
+ * - mdm_task_executions: Task execution history
+ * - mdm_message_queue: Persistent push message queue
+ * - mdm_plugin_storage: Plugin state persistence
  */
 
 // ============================================
@@ -454,6 +463,274 @@ export const mdmSchema: SchemaDefinition = {
         { columns: ['event_type'] },
         { columns: ['status'] },
         { columns: ['created_at'] },
+      ],
+    },
+
+    // ----------------------------------------
+    // Tenants Table (Multi-tenancy)
+    // ----------------------------------------
+    mdm_tenants: {
+      columns: {
+        id: { type: 'string', primaryKey: true },
+        name: { type: 'string' },
+        slug: { type: 'string', unique: true },
+        status: {
+          type: 'enum',
+          enumValues: ['active', 'suspended', 'pending'],
+          default: 'pending',
+        },
+        settings: { type: 'json', nullable: true },
+        metadata: { type: 'json', nullable: true },
+        created_at: { type: 'datetime', default: 'now' },
+        updated_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['slug'], unique: true },
+        { columns: ['status'] },
+      ],
+    },
+
+    // ----------------------------------------
+    // Roles Table (RBAC)
+    // ----------------------------------------
+    mdm_roles: {
+      columns: {
+        id: { type: 'string', primaryKey: true },
+        tenant_id: {
+          type: 'string',
+          nullable: true,
+          references: { table: 'mdm_tenants', column: 'id', onDelete: 'cascade' },
+        },
+        name: { type: 'string' },
+        description: { type: 'text', nullable: true },
+        permissions: { type: 'json' },
+        is_system: { type: 'boolean', default: false },
+        created_at: { type: 'datetime', default: 'now' },
+        updated_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['tenant_id'] },
+        { columns: ['name'] },
+        { columns: ['tenant_id', 'name'], unique: true },
+      ],
+    },
+
+    // ----------------------------------------
+    // Users Table (RBAC)
+    // ----------------------------------------
+    mdm_users: {
+      columns: {
+        id: { type: 'string', primaryKey: true },
+        tenant_id: {
+          type: 'string',
+          nullable: true,
+          references: { table: 'mdm_tenants', column: 'id', onDelete: 'cascade' },
+        },
+        email: { type: 'string' },
+        name: { type: 'string', nullable: true },
+        status: {
+          type: 'enum',
+          enumValues: ['active', 'inactive', 'pending'],
+          default: 'pending',
+        },
+        metadata: { type: 'json', nullable: true },
+        last_login_at: { type: 'datetime', nullable: true },
+        created_at: { type: 'datetime', default: 'now' },
+        updated_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['tenant_id'] },
+        { columns: ['email'] },
+        { columns: ['tenant_id', 'email'], unique: true },
+        { columns: ['status'] },
+      ],
+    },
+
+    // ----------------------------------------
+    // User Roles (Many-to-Many)
+    // ----------------------------------------
+    mdm_user_roles: {
+      columns: {
+        user_id: {
+          type: 'string',
+          references: { table: 'mdm_users', column: 'id', onDelete: 'cascade' },
+        },
+        role_id: {
+          type: 'string',
+          references: { table: 'mdm_roles', column: 'id', onDelete: 'cascade' },
+        },
+        created_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['user_id', 'role_id'], unique: true },
+        { columns: ['user_id'] },
+        { columns: ['role_id'] },
+      ],
+    },
+
+    // ----------------------------------------
+    // Audit Logs Table
+    // ----------------------------------------
+    mdm_audit_logs: {
+      columns: {
+        id: { type: 'string', primaryKey: true },
+        tenant_id: {
+          type: 'string',
+          nullable: true,
+          references: { table: 'mdm_tenants', column: 'id', onDelete: 'cascade' },
+        },
+        user_id: {
+          type: 'string',
+          nullable: true,
+          references: { table: 'mdm_users', column: 'id', onDelete: 'set null' },
+        },
+        action: { type: 'string' },
+        resource: { type: 'string' },
+        resource_id: { type: 'string', nullable: true },
+        details: { type: 'json', nullable: true },
+        ip_address: { type: 'string', nullable: true },
+        user_agent: { type: 'text', nullable: true },
+        created_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['tenant_id'] },
+        { columns: ['user_id'] },
+        { columns: ['action'] },
+        { columns: ['resource'] },
+        { columns: ['resource', 'resource_id'] },
+        { columns: ['created_at'] },
+      ],
+    },
+
+    // ----------------------------------------
+    // Scheduled Tasks Table
+    // ----------------------------------------
+    mdm_scheduled_tasks: {
+      columns: {
+        id: { type: 'string', primaryKey: true },
+        tenant_id: {
+          type: 'string',
+          nullable: true,
+          references: { table: 'mdm_tenants', column: 'id', onDelete: 'cascade' },
+        },
+        name: { type: 'string' },
+        description: { type: 'text', nullable: true },
+        task_type: {
+          type: 'enum',
+          enumValues: ['command', 'policy_update', 'app_install', 'maintenance', 'custom'],
+        },
+        schedule: { type: 'json' },
+        target: { type: 'json', nullable: true },
+        payload: { type: 'json', nullable: true },
+        status: {
+          type: 'enum',
+          enumValues: ['active', 'paused', 'completed', 'failed'],
+          default: 'active',
+        },
+        next_run_at: { type: 'datetime', nullable: true },
+        last_run_at: { type: 'datetime', nullable: true },
+        max_retries: { type: 'integer', default: 3 },
+        retry_count: { type: 'integer', default: 0 },
+        created_at: { type: 'datetime', default: 'now' },
+        updated_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['tenant_id'] },
+        { columns: ['task_type'] },
+        { columns: ['status'] },
+        { columns: ['next_run_at'] },
+      ],
+    },
+
+    // ----------------------------------------
+    // Task Executions Table
+    // ----------------------------------------
+    mdm_task_executions: {
+      columns: {
+        id: { type: 'string', primaryKey: true },
+        task_id: {
+          type: 'string',
+          references: { table: 'mdm_scheduled_tasks', column: 'id', onDelete: 'cascade' },
+        },
+        status: {
+          type: 'enum',
+          enumValues: ['running', 'completed', 'failed'],
+          default: 'running',
+        },
+        started_at: { type: 'datetime', default: 'now' },
+        completed_at: { type: 'datetime', nullable: true },
+        devices_processed: { type: 'integer', default: 0 },
+        devices_succeeded: { type: 'integer', default: 0 },
+        devices_failed: { type: 'integer', default: 0 },
+        error: { type: 'text', nullable: true },
+        details: { type: 'json', nullable: true },
+      },
+      indexes: [
+        { columns: ['task_id'] },
+        { columns: ['status'] },
+        { columns: ['started_at'] },
+      ],
+    },
+
+    // ----------------------------------------
+    // Message Queue Table
+    // ----------------------------------------
+    mdm_message_queue: {
+      columns: {
+        id: { type: 'string', primaryKey: true },
+        tenant_id: {
+          type: 'string',
+          nullable: true,
+          references: { table: 'mdm_tenants', column: 'id', onDelete: 'cascade' },
+        },
+        device_id: {
+          type: 'string',
+          references: { table: 'mdm_devices', column: 'id', onDelete: 'cascade' },
+        },
+        message_type: { type: 'string' },
+        payload: { type: 'json' },
+        priority: {
+          type: 'enum',
+          enumValues: ['high', 'normal', 'low'],
+          default: 'normal',
+        },
+        status: {
+          type: 'enum',
+          enumValues: ['pending', 'processing', 'delivered', 'failed', 'expired'],
+          default: 'pending',
+        },
+        attempts: { type: 'integer', default: 0 },
+        max_attempts: { type: 'integer', default: 3 },
+        last_attempt_at: { type: 'datetime', nullable: true },
+        last_error: { type: 'text', nullable: true },
+        expires_at: { type: 'datetime', nullable: true },
+        created_at: { type: 'datetime', default: 'now' },
+        updated_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['tenant_id'] },
+        { columns: ['device_id'] },
+        { columns: ['status'] },
+        { columns: ['priority'] },
+        { columns: ['expires_at'] },
+        { columns: ['device_id', 'status', 'priority'] },
+      ],
+    },
+
+    // ----------------------------------------
+    // Plugin Storage Table
+    // ----------------------------------------
+    mdm_plugin_storage: {
+      columns: {
+        plugin_name: { type: 'string' },
+        key: { type: 'string' },
+        value: { type: 'json' },
+        created_at: { type: 'datetime', default: 'now' },
+        updated_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['plugin_name', 'key'], unique: true },
+        { columns: ['plugin_name'] },
       ],
     },
   },

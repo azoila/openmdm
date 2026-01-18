@@ -64,6 +64,15 @@ import type {
   CommandResult,
   InstalledApp,
   WebhookManager,
+  TenantManager,
+  AuthorizationManager,
+  AuditManager,
+  ScheduleManager,
+  MessageQueueManager,
+  DashboardManager,
+  PluginStorageAdapter,
+  GroupTreeNode,
+  GroupHierarchyStats,
 } from './types';
 import {
   DeviceNotFoundError,
@@ -71,12 +80,28 @@ import {
   EnrollmentError,
 } from './types';
 import { createWebhookManager } from './webhooks';
+import { createTenantManager } from './tenant';
+import { createAuthorizationManager } from './authorization';
+import { createAuditManager } from './audit';
+import { createScheduleManager } from './schedule';
+import { createMessageQueueManager } from './queue';
+import { createDashboardManager } from './dashboard';
+import { createPluginStorageAdapter, createMemoryPluginStorageAdapter } from './plugin-storage';
 
 // Re-export all types
 export * from './types';
 export * from './schema';
 export { createWebhookManager, verifyWebhookSignature } from './webhooks';
 export type { WebhookPayload } from './webhooks';
+
+// Re-export enterprise manager factories
+export { createTenantManager } from './tenant';
+export { createAuthorizationManager } from './authorization';
+export { createAuditManager } from './audit';
+export { createScheduleManager } from './schedule';
+export { createMessageQueueManager } from './queue';
+export { createDashboardManager } from './dashboard';
+export { createPluginStorageAdapter, createMemoryPluginStorageAdapter, createPluginKey, parsePluginKey } from './plugin-storage';
 
 /**
  * Create an MDM instance with the given configuration.
@@ -96,6 +121,46 @@ export function createMDM(config: MDMConfig): MDMInstance {
   const webhookManager: WebhookManager | undefined = webhooksConfig
     ? createWebhookManager(webhooksConfig)
     : undefined;
+
+  // ============================================
+  // Enterprise Managers (optional)
+  // ============================================
+
+  // Create tenant manager if multi-tenancy is enabled
+  const tenantManager: TenantManager | undefined = config.multiTenancy?.enabled
+    ? createTenantManager(database)
+    : undefined;
+
+  // Create authorization manager if authorization is enabled
+  const authorizationManager: AuthorizationManager | undefined = config.authorization?.enabled
+    ? createAuthorizationManager(database)
+    : undefined;
+
+  // Create audit manager if audit logging is enabled
+  const auditManager: AuditManager | undefined = config.audit?.enabled
+    ? createAuditManager(database)
+    : undefined;
+
+  // Create schedule manager if scheduling is enabled
+  const scheduleManager: ScheduleManager | undefined = config.scheduling?.enabled
+    ? createScheduleManager(database)
+    : undefined;
+
+  // Create message queue manager if the database supports it
+  const messageQueueManager: MessageQueueManager | undefined = database.enqueueMessage
+    ? createMessageQueueManager(database)
+    : undefined;
+
+  // Create dashboard manager (always available, uses database fallbacks)
+  const dashboardManager: DashboardManager = createDashboardManager(database);
+
+  // Create plugin storage adapter
+  const pluginStorageAdapter: PluginStorageAdapter | undefined =
+    config.pluginStorage?.adapter === 'database'
+      ? createPluginStorageAdapter(database)
+      : config.pluginStorage?.adapter === 'memory'
+        ? createMemoryPluginStorageAdapter()
+        : undefined;
 
   // Event subscription
   const on = <T extends EventType>(
@@ -656,6 +721,155 @@ export function createMDM(config: MDMConfig): MDMInstance {
       const allGroups = await database.listGroups();
       return allGroups.filter((g) => g.parentId === groupId);
     },
+
+    async getTree(rootId?: string): Promise<GroupTreeNode[]> {
+      // Use database implementation if available
+      if (database.getGroupTree) {
+        return database.getGroupTree(rootId);
+      }
+
+      // Fallback: Build tree from flat list
+      const allGroups = await database.listGroups();
+      const groupMap = new Map(allGroups.map((g) => [g.id, g]));
+
+      const buildNode = (group: Group, depth: number, path: string[]): GroupTreeNode => {
+        const children = allGroups
+          .filter((g) => g.parentId === group.id)
+          .map((child) => buildNode(child, depth + 1, [...path, group.id]));
+
+        return {
+          ...group,
+          children,
+          depth,
+          path,
+          effectivePolicyId: group.policyId,
+        };
+      };
+
+      // Find root groups (those with no parent or matching rootId)
+      const roots = allGroups.filter((g) =>
+        rootId ? g.id === rootId : !g.parentId
+      );
+
+      return roots.map((root) => buildNode(root, 0, []));
+    },
+
+    async getAncestors(groupId: string): Promise<Group[]> {
+      // Use database implementation if available
+      if (database.getGroupAncestors) {
+        return database.getGroupAncestors(groupId);
+      }
+
+      // Fallback: Traverse up the tree
+      const ancestors: Group[] = [];
+      const allGroups = await database.listGroups();
+      const groupMap = new Map(allGroups.map((g) => [g.id, g]));
+
+      let current = groupMap.get(groupId);
+      while (current?.parentId) {
+        const parent = groupMap.get(current.parentId);
+        if (parent) {
+          ancestors.push(parent);
+          current = parent;
+        } else {
+          break;
+        }
+      }
+
+      return ancestors;
+    },
+
+    async getDescendants(groupId: string): Promise<Group[]> {
+      // Use database implementation if available
+      if (database.getGroupDescendants) {
+        return database.getGroupDescendants(groupId);
+      }
+
+      // Fallback: Find all descendants recursively
+      const allGroups = await database.listGroups();
+      const descendants: Group[] = [];
+
+      const findDescendants = (parentId: string) => {
+        const children = allGroups.filter((g) => g.parentId === parentId);
+        for (const child of children) {
+          descendants.push(child);
+          findDescendants(child.id);
+        }
+      };
+
+      findDescendants(groupId);
+      return descendants;
+    },
+
+    async move(groupId: string, newParentId: string | null): Promise<Group> {
+      // Validate that we're not creating a cycle
+      if (newParentId) {
+        const ancestors = await this.getAncestors(newParentId);
+        if (ancestors.some((a) => a.id === groupId)) {
+          throw new Error('Cannot move group: would create circular reference');
+        }
+      }
+
+      return database.updateGroup(groupId, { parentId: newParentId });
+    },
+
+    async getEffectivePolicy(groupId: string): Promise<Policy | null> {
+      // Use database implementation if available
+      if (database.getGroupEffectivePolicy) {
+        return database.getGroupEffectivePolicy(groupId);
+      }
+
+      // Fallback: Walk up the tree to find first policy
+      const group = await database.findGroup(groupId);
+      if (!group) return null;
+
+      if (group.policyId) {
+        return database.findPolicy(group.policyId);
+      }
+
+      // Check ancestors
+      const ancestors = await this.getAncestors(groupId);
+      for (const ancestor of ancestors) {
+        if (ancestor.policyId) {
+          return database.findPolicy(ancestor.policyId);
+        }
+      }
+
+      return null;
+    },
+
+    async getHierarchyStats(): Promise<GroupHierarchyStats> {
+      // Use database implementation if available
+      if (database.getGroupHierarchyStats) {
+        return database.getGroupHierarchyStats();
+      }
+
+      // Fallback: Compute from flat list
+      const allGroups = await database.listGroups();
+      let maxDepth = 0;
+      let groupsWithDevices = 0;
+      let groupsWithPolicies = 0;
+
+      for (const group of allGroups) {
+        // Calculate depth
+        const ancestors = await this.getAncestors(group.id);
+        maxDepth = Math.max(maxDepth, ancestors.length);
+
+        // Check for devices
+        const devices = await database.listDevicesInGroup(group.id);
+        if (devices.length > 0) groupsWithDevices++;
+
+        // Check for policies
+        if (group.policyId) groupsWithPolicies++;
+      }
+
+      return {
+        totalGroups: allGroups.length,
+        maxDepth,
+        groupsWithDevices,
+        groupsWithPolicies,
+      };
+    },
   };
 
   // ============================================
@@ -969,6 +1183,14 @@ export function createMDM(config: MDMConfig): MDMInstance {
     verifyDeviceToken,
     getPlugins,
     getPlugin,
+    // Enterprise managers (optional)
+    tenants: tenantManager,
+    authorization: authorizationManager,
+    audit: auditManager,
+    schedules: scheduleManager,
+    messageQueue: messageQueueManager,
+    dashboard: dashboardManager,
+    pluginStorage: pluginStorageAdapter,
   };
 
   // Initialize plugins
