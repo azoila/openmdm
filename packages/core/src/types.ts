@@ -660,6 +660,37 @@ export interface MDMConfig {
   onHeartbeat?: (device: Device, heartbeat: Heartbeat) => Promise<void>;
   onCommand?: (command: Command) => Promise<void>;
   onEvent?: (event: MDMEvent) => Promise<void>;
+
+  // Enterprise features
+  /** Multi-tenancy configuration */
+  multiTenancy?: {
+    enabled: boolean;
+    defaultTenantId?: string;
+    tenantResolver?: (context: unknown) => Promise<string | null>;
+  };
+
+  /** Authorization (RBAC) configuration */
+  authorization?: {
+    enabled: boolean;
+    defaultRole?: string;
+  };
+
+  /** Audit logging configuration */
+  audit?: {
+    enabled: boolean;
+    retentionDays?: number;
+  };
+
+  /** Scheduling configuration */
+  scheduling?: {
+    enabled: boolean;
+    timezone?: string;
+  };
+
+  /** Plugin storage configuration */
+  pluginStorage?: {
+    adapter: 'database' | 'memory';
+  };
 }
 
 export interface StorageConfig {
@@ -834,6 +865,82 @@ export interface DatabaseAdapter {
   updateRollback?(id: string, data: Partial<AppRollback>): Promise<AppRollback>;
   listRollbacks?(filter?: { deviceId?: string; packageName?: string }): Promise<AppRollback[]>;
 
+  // Group Hierarchy (optional)
+  getGroupChildren?(parentId: string | null): Promise<Group[]>;
+  getGroupAncestors?(groupId: string): Promise<Group[]>;
+  getGroupDescendants?(groupId: string): Promise<Group[]>;
+  getGroupTree?(rootId?: string): Promise<GroupTreeNode[]>;
+  getGroupEffectivePolicy?(groupId: string): Promise<Policy | null>;
+  moveGroup?(groupId: string, newParentId: string | null): Promise<Group>;
+  getGroupHierarchyStats?(): Promise<GroupHierarchyStats>;
+
+  // Tenants (optional - for multi-tenancy)
+  findTenant?(id: string): Promise<Tenant | null>;
+  findTenantBySlug?(slug: string): Promise<Tenant | null>;
+  listTenants?(filter?: TenantFilter): Promise<TenantListResult>;
+  createTenant?(data: CreateTenantInput): Promise<Tenant>;
+  updateTenant?(id: string, data: UpdateTenantInput): Promise<Tenant>;
+  deleteTenant?(id: string): Promise<void>;
+  getTenantStats?(tenantId: string): Promise<TenantStats>;
+
+  // Users (optional - for RBAC)
+  findUser?(id: string): Promise<User | null>;
+  findUserByEmail?(email: string, tenantId?: string): Promise<User | null>;
+  listUsers?(filter?: UserFilter): Promise<UserListResult>;
+  createUser?(data: CreateUserInput): Promise<User>;
+  updateUser?(id: string, data: UpdateUserInput): Promise<User>;
+  deleteUser?(id: string): Promise<void>;
+
+  // Roles (optional - for RBAC)
+  findRole?(id: string): Promise<Role | null>;
+  listRoles?(tenantId?: string): Promise<Role[]>;
+  createRole?(data: CreateRoleInput): Promise<Role>;
+  updateRole?(id: string, data: UpdateRoleInput): Promise<Role>;
+  deleteRole?(id: string): Promise<void>;
+  assignRoleToUser?(userId: string, roleId: string): Promise<void>;
+  removeRoleFromUser?(userId: string, roleId: string): Promise<void>;
+  getUserRoles?(userId: string): Promise<Role[]>;
+
+  // Audit Logs (optional - for compliance)
+  createAuditLog?(data: CreateAuditLogInput): Promise<AuditLog>;
+  listAuditLogs?(filter?: AuditLogFilter): Promise<AuditLogListResult>;
+  deleteAuditLogs?(filter: { olderThan?: Date; tenantId?: string }): Promise<number>;
+
+  // Scheduled Tasks (optional - for scheduling)
+  findScheduledTask?(id: string): Promise<ScheduledTask | null>;
+  listScheduledTasks?(filter?: ScheduledTaskFilter): Promise<ScheduledTaskListResult>;
+  createScheduledTask?(data: CreateScheduledTaskInput): Promise<ScheduledTask>;
+  updateScheduledTask?(id: string, data: UpdateScheduledTaskInput): Promise<ScheduledTask>;
+  deleteScheduledTask?(id: string): Promise<void>;
+  getUpcomingTasks?(hours: number): Promise<ScheduledTask[]>;
+  createTaskExecution?(data: { taskId: string }): Promise<TaskExecution>;
+  updateTaskExecution?(id: string, data: Partial<TaskExecution>): Promise<TaskExecution>;
+  listTaskExecutions?(taskId: string, limit?: number): Promise<TaskExecution[]>;
+
+  // Message Queue (optional - for persistent messaging)
+  enqueueMessage?(data: EnqueueMessageInput): Promise<QueuedMessage>;
+  dequeueMessages?(deviceId: string, limit?: number): Promise<QueuedMessage[]>;
+  peekMessages?(deviceId: string, limit?: number): Promise<QueuedMessage[]>;
+  acknowledgeMessage?(messageId: string): Promise<void>;
+  failMessage?(messageId: string, error: string): Promise<void>;
+  retryFailedMessages?(maxAttempts?: number): Promise<number>;
+  purgeExpiredMessages?(): Promise<number>;
+  getQueueStats?(tenantId?: string): Promise<QueueStats>;
+
+  // Plugin Storage (optional)
+  getPluginValue?(pluginName: string, key: string): Promise<unknown | null>;
+  setPluginValue?(pluginName: string, key: string, value: unknown): Promise<void>;
+  deletePluginValue?(pluginName: string, key: string): Promise<void>;
+  listPluginKeys?(pluginName: string, prefix?: string): Promise<string[]>;
+  clearPluginData?(pluginName: string): Promise<void>;
+
+  // Dashboard (optional - for analytics)
+  getDashboardStats?(tenantId?: string): Promise<DashboardStats>;
+  getDeviceStatusBreakdown?(tenantId?: string): Promise<DeviceStatusBreakdown>;
+  getEnrollmentTrend?(days: number, tenantId?: string): Promise<EnrollmentTrendPoint[]>;
+  getCommandSuccessRates?(tenantId?: string): Promise<CommandSuccessRates>;
+  getAppInstallationSummary?(tenantId?: string): Promise<AppInstallationSummary>;
+
   // Transactions (optional)
   transaction?<T>(fn: () => Promise<T>): Promise<T>;
 }
@@ -966,6 +1073,21 @@ export interface MDMInstance {
   /** Group management */
   groups: GroupManager;
 
+  /** Tenant management (if multi-tenancy enabled) */
+  tenants?: TenantManager;
+  /** Authorization management (RBAC) */
+  authorization?: AuthorizationManager;
+  /** Audit logging */
+  audit?: AuditManager;
+  /** Scheduled task management */
+  schedules?: ScheduleManager;
+  /** Persistent message queue */
+  messageQueue?: MessageQueueManager;
+  /** Dashboard analytics */
+  dashboard?: DashboardManager;
+  /** Plugin storage */
+  pluginStorage?: PluginStorageAdapter;
+
   /** Push notification service */
   push: PushAdapter;
 
@@ -1056,15 +1178,577 @@ export interface CommandManager {
 }
 
 export interface GroupManager {
+  // Basic CRUD operations
   get(id: string): Promise<Group | null>;
   list(): Promise<Group[]>;
   create(data: CreateGroupInput): Promise<Group>;
   update(id: string, data: UpdateGroupInput): Promise<Group>;
   delete(id: string): Promise<void>;
+
+  // Device management
   getDevices(groupId: string): Promise<Device[]>;
   addDevice(groupId: string, deviceId: string): Promise<void>;
   removeDevice(groupId: string, deviceId: string): Promise<void>;
+
+  // Hierarchy operations
   getChildren(groupId: string): Promise<Group[]>;
+  getTree(rootId?: string): Promise<GroupTreeNode[]>;
+  getAncestors(groupId: string): Promise<Group[]>;
+  getDescendants(groupId: string): Promise<Group[]>;
+  move(groupId: string, newParentId: string | null): Promise<Group>;
+  getEffectivePolicy(groupId: string): Promise<Policy | null>;
+  getHierarchyStats(): Promise<GroupHierarchyStats>;
+}
+
+// ============================================
+// Group Hierarchy Types
+// ============================================
+
+export interface GroupTreeNode extends Group {
+  children: GroupTreeNode[];
+  depth: number;
+  path: string[];
+  effectivePolicyId?: string | null;
+}
+
+export interface GroupHierarchyStats {
+  totalGroups: number;
+  maxDepth: number;
+  groupsWithDevices: number;
+  groupsWithPolicies: number;
+}
+
+// ============================================
+// Tenant Types (Multi-tenancy)
+// ============================================
+
+export type TenantStatus = 'active' | 'suspended' | 'pending';
+
+export interface Tenant {
+  id: string;
+  name: string;
+  slug: string;
+  status: TenantStatus;
+  settings?: TenantSettings | null;
+  metadata?: Record<string, unknown> | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface TenantSettings {
+  maxDevices?: number;
+  maxUsers?: number;
+  features?: string[];
+  branding?: {
+    logo?: string;
+    primaryColor?: string;
+  };
+}
+
+export interface CreateTenantInput {
+  name: string;
+  slug: string;
+  settings?: TenantSettings;
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpdateTenantInput {
+  name?: string;
+  slug?: string;
+  status?: TenantStatus;
+  settings?: TenantSettings;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TenantFilter {
+  status?: TenantStatus;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TenantListResult {
+  tenants: Tenant[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface TenantStats {
+  deviceCount: number;
+  userCount: number;
+  policyCount: number;
+  appCount: number;
+}
+
+// ============================================
+// RBAC Types (Role-Based Access Control)
+// ============================================
+
+export type PermissionAction = 'create' | 'read' | 'update' | 'delete' | 'manage' | '*';
+export type PermissionResource = 'devices' | 'policies' | 'apps' | 'groups' | 'commands' | 'users' | 'roles' | 'tenants' | 'audit' | '*';
+
+export interface Permission {
+  action: PermissionAction;
+  resource: PermissionResource;
+  resourceId?: string;
+}
+
+export interface Role {
+  id: string;
+  tenantId?: string | null;
+  name: string;
+  description?: string | null;
+  permissions: Permission[];
+  isSystem: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CreateRoleInput {
+  tenantId?: string;
+  name: string;
+  description?: string;
+  permissions: Permission[];
+}
+
+export interface UpdateRoleInput {
+  name?: string;
+  description?: string;
+  permissions?: Permission[];
+}
+
+export interface User {
+  id: string;
+  tenantId?: string | null;
+  email: string;
+  name?: string | null;
+  status: 'active' | 'inactive' | 'pending';
+  metadata?: Record<string, unknown> | null;
+  lastLoginAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface UserWithRoles extends User {
+  roles: Role[];
+}
+
+export interface CreateUserInput {
+  tenantId?: string;
+  email: string;
+  name?: string;
+  status?: 'active' | 'inactive' | 'pending';
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpdateUserInput {
+  email?: string;
+  name?: string;
+  status?: 'active' | 'inactive' | 'pending';
+  metadata?: Record<string, unknown>;
+}
+
+export interface UserFilter {
+  tenantId?: string;
+  status?: 'active' | 'inactive' | 'pending';
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface UserListResult {
+  users: User[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// ============================================
+// Audit Types
+// ============================================
+
+export type AuditAction = 'create' | 'read' | 'update' | 'delete' | 'login' | 'logout' | 'enroll' | 'unenroll' | 'command' | 'export' | 'import' | 'custom';
+
+export interface AuditLog {
+  id: string;
+  tenantId?: string | null;
+  userId?: string | null;
+  action: AuditAction;
+  resource: string;
+  resourceId?: string | null;
+  status: 'success' | 'failure';
+  error?: string | null;
+  details?: Record<string, unknown> | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  createdAt: Date;
+}
+
+export interface CreateAuditLogInput {
+  tenantId?: string;
+  userId?: string;
+  action: AuditAction;
+  resource: string;
+  resourceId?: string;
+  status?: 'success' | 'failure';
+  error?: string;
+  details?: Record<string, unknown>;
+  ipAddress?: string;
+  userAgent?: string;
+}
+
+export interface AuditConfig {
+  enabled: boolean;
+  retentionDays?: number;
+  skipReadOperations?: boolean;
+  logActions?: AuditAction[];
+  logResources?: string[];
+}
+
+export interface AuditSummary {
+  totalLogs: number;
+  byAction: Record<AuditAction, number>;
+  byResource: Record<string, number>;
+  byStatus: { success: number; failure: number };
+  topUsers: Array<{ userId: string; count: number }>;
+  recentFailures: AuditLog[];
+}
+
+export interface AuditLogFilter {
+  tenantId?: string;
+  userId?: string;
+  action?: string;
+  resource?: string;
+  resourceId?: string;
+  startDate?: Date;
+  endDate?: Date;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AuditLogListResult {
+  logs: AuditLog[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// ============================================
+// Schedule Types
+// ============================================
+
+export type TaskType = 'command' | 'policy_update' | 'app_install' | 'maintenance' | 'custom';
+export type ScheduledTaskStatus = 'active' | 'paused' | 'completed' | 'failed';
+
+export interface MaintenanceWindow {
+  daysOfWeek: number[];
+  startTime: string;
+  endTime: string;
+  timezone: string;
+}
+
+export interface TaskSchedule {
+  type: 'once' | 'recurring' | 'window';
+  executeAt?: Date;
+  cron?: string;
+  window?: MaintenanceWindow;
+}
+
+export interface ScheduledTask {
+  id: string;
+  tenantId?: string | null;
+  name: string;
+  description?: string | null;
+  taskType: TaskType;
+  schedule: TaskSchedule;
+  target?: DeployTarget;
+  payload?: Record<string, unknown> | null;
+  status: ScheduledTaskStatus;
+  nextRunAt?: Date | null;
+  lastRunAt?: Date | null;
+  maxRetries: number;
+  retryCount: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CreateScheduledTaskInput {
+  tenantId?: string;
+  name: string;
+  description?: string;
+  taskType: TaskType;
+  schedule: TaskSchedule;
+  target?: DeployTarget;
+  payload?: Record<string, unknown>;
+  maxRetries?: number;
+}
+
+export interface UpdateScheduledTaskInput {
+  name?: string;
+  description?: string;
+  schedule?: TaskSchedule;
+  target?: DeployTarget;
+  payload?: Record<string, unknown>;
+  status?: ScheduledTaskStatus;
+  maxRetries?: number;
+}
+
+export interface ScheduledTaskFilter {
+  tenantId?: string;
+  taskType?: TaskType | TaskType[];
+  status?: ScheduledTaskStatus | ScheduledTaskStatus[];
+  limit?: number;
+  offset?: number;
+}
+
+export interface ScheduledTaskListResult {
+  tasks: ScheduledTask[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface TaskExecution {
+  id: string;
+  taskId: string;
+  status: 'running' | 'completed' | 'failed';
+  startedAt: Date;
+  completedAt?: Date | null;
+  devicesProcessed: number;
+  devicesSucceeded: number;
+  devicesFailed: number;
+  error?: string | null;
+  details?: Record<string, unknown> | null;
+}
+
+// ============================================
+// Message Queue Types
+// ============================================
+
+export type QueueMessageStatus = 'pending' | 'processing' | 'delivered' | 'failed' | 'expired';
+
+export interface QueuedMessage {
+  id: string;
+  tenantId?: string | null;
+  deviceId: string;
+  messageType: string;
+  payload: Record<string, unknown>;
+  priority: 'high' | 'normal' | 'low';
+  status: QueueMessageStatus;
+  attempts: number;
+  maxAttempts: number;
+  lastAttemptAt?: Date | null;
+  lastError?: string | null;
+  expiresAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface EnqueueMessageInput {
+  tenantId?: string;
+  deviceId: string;
+  messageType: string;
+  payload: Record<string, unknown>;
+  priority?: 'high' | 'normal' | 'low';
+  maxAttempts?: number;
+  ttlSeconds?: number;
+}
+
+export interface QueueStats {
+  pending: number;
+  processing: number;
+  delivered: number;
+  failed: number;
+  expired: number;
+  byDevice: Record<string, number>;
+  oldestPending?: Date;
+}
+
+// ============================================
+// Dashboard Types
+// ============================================
+
+export interface DashboardStats {
+  devices: {
+    total: number;
+    enrolled: number;
+    active: number;
+    blocked: number;
+    pending: number;
+  };
+  policies: {
+    total: number;
+    deployed: number;
+  };
+  applications: {
+    total: number;
+    deployed: number;
+  };
+  commands: {
+    pendingCount: number;
+    last24hTotal: number;
+    last24hSuccess: number;
+    last24hFailed: number;
+  };
+  groups: {
+    total: number;
+    withDevices: number;
+  };
+}
+
+export interface DeviceStatusBreakdown {
+  byStatus: Record<DeviceStatus, number>;
+  byOs: Record<string, number>;
+  byManufacturer: Record<string, number>;
+  byModel: Record<string, number>;
+}
+
+export interface EnrollmentTrendPoint {
+  date: Date;
+  enrolled: number;
+  unenrolled: number;
+  netChange: number;
+  totalDevices: number;
+}
+
+export interface CommandSuccessRates {
+  overall: {
+    total: number;
+    completed: number;
+    failed: number;
+    successRate: number;
+  };
+  byType: Record<string, {
+    total: number;
+    completed: number;
+    failed: number;
+    successRate: number;
+    avgExecutionTimeMs?: number;
+  }>;
+  last24h: {
+    total: number;
+    completed: number;
+    failed: number;
+    pending: number;
+  };
+}
+
+export interface AppInstallationSummary {
+  total: number;
+  byStatus: Record<string, number>;
+  recentFailures: Array<{
+    packageName: string;
+    deviceId: string;
+    error: string;
+    timestamp: Date;
+  }>;
+  topInstalled: Array<{
+    packageName: string;
+    name: string;
+    installedCount: number;
+  }>;
+}
+
+// ============================================
+// Plugin Storage Types
+// ============================================
+
+export interface PluginStorageAdapter {
+  get<T>(pluginName: string, key: string): Promise<T | null>;
+  set<T>(pluginName: string, key: string, value: T): Promise<void>;
+  delete(pluginName: string, key: string): Promise<void>;
+  list(pluginName: string, prefix?: string): Promise<string[]>;
+  clear(pluginName: string): Promise<void>;
+}
+
+export interface PluginStorageEntry {
+  pluginName: string;
+  key: string;
+  value: unknown;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============================================
+// Enterprise Manager Interfaces
+// ============================================
+
+export interface TenantManager {
+  get(id: string): Promise<Tenant | null>;
+  getBySlug(slug: string): Promise<Tenant | null>;
+  list(filter?: TenantFilter): Promise<TenantListResult>;
+  create(data: CreateTenantInput): Promise<Tenant>;
+  update(id: string, data: UpdateTenantInput): Promise<Tenant>;
+  delete(id: string, cascade?: boolean): Promise<void>;
+  getStats(tenantId: string): Promise<TenantStats>;
+  activate(id: string): Promise<Tenant>;
+  deactivate(id: string): Promise<Tenant>;
+}
+
+export interface AuthorizationManager {
+  createRole(data: CreateRoleInput): Promise<Role>;
+  getRole(id: string): Promise<Role | null>;
+  listRoles(tenantId?: string): Promise<Role[]>;
+  updateRole(id: string, data: UpdateRoleInput): Promise<Role>;
+  deleteRole(id: string): Promise<void>;
+  createUser(data: CreateUserInput): Promise<User>;
+  getUser(id: string): Promise<UserWithRoles | null>;
+  getUserByEmail(email: string, tenantId?: string): Promise<UserWithRoles | null>;
+  listUsers(filter?: UserFilter): Promise<UserListResult>;
+  updateUser(id: string, data: UpdateUserInput): Promise<User>;
+  deleteUser(id: string): Promise<void>;
+  assignRole(userId: string, roleId: string): Promise<void>;
+  removeRole(userId: string, roleId: string): Promise<void>;
+  getUserRoles(userId: string): Promise<Role[]>;
+  can(userId: string, action: PermissionAction, resource: PermissionResource, resourceId?: string): Promise<boolean>;
+  canAny(userId: string, permissions: Array<{ action: PermissionAction; resource: PermissionResource }>): Promise<boolean>;
+  requirePermission(userId: string, action: PermissionAction, resource: PermissionResource, resourceId?: string): Promise<void>;
+  isAdmin(userId: string): Promise<boolean>;
+}
+
+export interface AuditManager {
+  log(entry: CreateAuditLogInput): Promise<AuditLog>;
+  list(filter?: AuditLogFilter): Promise<AuditLogListResult>;
+  getByResource(resource: string, resourceId: string): Promise<AuditLog[]>;
+  getByUser(userId: string, filter?: AuditLogFilter): Promise<AuditLogListResult>;
+  export(filter: AuditLogFilter, format: 'json' | 'csv'): Promise<string>;
+  purge(olderThanDays?: number): Promise<number>;
+  getSummary(tenantId?: string, days?: number): Promise<AuditSummary>;
+}
+
+export interface ScheduleManager {
+  get(id: string): Promise<ScheduledTask | null>;
+  list(filter?: ScheduledTaskFilter): Promise<ScheduledTaskListResult>;
+  create(data: CreateScheduledTaskInput): Promise<ScheduledTask>;
+  update(id: string, data: UpdateScheduledTaskInput): Promise<ScheduledTask>;
+  delete(id: string): Promise<void>;
+  pause(id: string): Promise<ScheduledTask>;
+  resume(id: string): Promise<ScheduledTask>;
+  runNow(id: string): Promise<TaskExecution>;
+  getUpcoming(hours: number): Promise<ScheduledTask[]>;
+  getExecutions(taskId: string, limit?: number): Promise<TaskExecution[]>;
+  calculateNextRun(schedule: TaskSchedule): Date | null;
+}
+
+export interface MessageQueueManager {
+  enqueue(message: EnqueueMessageInput): Promise<QueuedMessage>;
+  enqueueBatch(messages: EnqueueMessageInput[]): Promise<QueuedMessage[]>;
+  dequeue(deviceId: string, limit?: number): Promise<QueuedMessage[]>;
+  acknowledge(messageId: string): Promise<void>;
+  fail(messageId: string, error: string): Promise<void>;
+  retryFailed(maxAttempts?: number): Promise<number>;
+  purgeExpired(): Promise<number>;
+  getStats(tenantId?: string): Promise<QueueStats>;
+  peek(deviceId: string, limit?: number): Promise<QueuedMessage[]>;
+}
+
+export interface DashboardManager {
+  getStats(tenantId?: string): Promise<DashboardStats>;
+  getDeviceStatusBreakdown(tenantId?: string): Promise<DeviceStatusBreakdown>;
+  getEnrollmentTrend(days: number, tenantId?: string): Promise<EnrollmentTrendPoint[]>;
+  getCommandSuccessRates(tenantId?: string): Promise<CommandSuccessRates>;
+  getAppInstallationSummary(tenantId?: string): Promise<AppInstallationSummary>;
 }
 
 // ============================================
@@ -1133,6 +1817,30 @@ export class PolicyNotFoundError extends MDMError {
 export class ApplicationNotFoundError extends MDMError {
   constructor(identifier: string) {
     super(`Application not found: ${identifier}`, 'APPLICATION_NOT_FOUND', 404);
+  }
+}
+
+export class TenantNotFoundError extends MDMError {
+  constructor(identifier: string) {
+    super(`Tenant not found: ${identifier}`, 'TENANT_NOT_FOUND', 404);
+  }
+}
+
+export class RoleNotFoundError extends MDMError {
+  constructor(identifier: string) {
+    super(`Role not found: ${identifier}`, 'ROLE_NOT_FOUND', 404);
+  }
+}
+
+export class GroupNotFoundError extends MDMError {
+  constructor(identifier: string) {
+    super(`Group not found: ${identifier}`, 'GROUP_NOT_FOUND', 404);
+  }
+}
+
+export class UserNotFoundError extends MDMError {
+  constructor(identifier: string) {
+    super(`User not found: ${identifier}`, 'USER_NOT_FOUND', 404);
   }
 }
 
