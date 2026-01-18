@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/push-mqtt",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MQTT push adapter for OpenMDM - ideal for private networks and self-hosted deployments",
   "author": "OpenMDM Contributors",
   "type": "module",

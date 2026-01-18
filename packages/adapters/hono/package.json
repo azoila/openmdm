@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/hono",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Hono framework adapter for OpenMDM",
   "author": "OpenMDM Contributors",
   "type": "module",

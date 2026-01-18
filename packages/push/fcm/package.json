@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/push-fcm",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Firebase Cloud Messaging push adapter for OpenMDM",
   "author": "OpenMDM Contributors",
   "type": "module",

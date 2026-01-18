@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/plugin-geofence",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Geofencing plugin for OpenMDM - location-based policy enforcement for Android devices",
   "author": "OpenMDM Contributors",
   "type": "module",

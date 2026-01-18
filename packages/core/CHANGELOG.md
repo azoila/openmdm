@@ -1,5 +1,24 @@
 # @openmdm/core
 
+## 0.3.0
+
+### Minor Changes
+
+- Add enterprise SDK features:
+
+  - **Multi-tenancy** - TenantManager for customer/organization isolation
+  - **RBAC** - AuthorizationManager with granular permission system
+  - **Audit logging** - AuditManager for compliance and security tracking
+  - **Scheduling** - ScheduleManager for scheduled tasks with cron support
+  - **Message queue** - MessageQueueManager for persistent push messaging
+  - **Dashboard** - DashboardManager for analytics and statistics
+  - **Plugin storage** - PluginStorageAdapter for persistent plugin state
+  - **Group hierarchy** - Tree operations, ancestors, descendants, effective policies
+
+  New database tables: mdm_tenants, mdm_roles, mdm_users, mdm_user_roles, mdm_audit_logs, mdm_scheduled_tasks, mdm_task_executions, mdm_message_queue, mdm_plugin_storage
+
+  All features are optional and backwards compatible.
+
 ## 0.2.0
 
 ### Minor Changes
