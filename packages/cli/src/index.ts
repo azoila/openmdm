@@ -37,10 +37,23 @@ program
     await initProject(options);
   });
 
+// Generate command (like better-auth)
+program
+  .command('generate')
+  .description('Generate database schema for your ORM')
+  .option('-a, --adapter <type>', 'Adapter type (drizzle, sql)')
+  .option('-p, --provider <type>', 'Database provider (pg, mysql, sqlite)')
+  .option('-o, --output <path>', 'Output file path')
+  .option('-y, --yes', 'Skip confirmation prompts')
+  .action(async (options) => {
+    const { runGenerate } = await import('./commands/generate.js');
+    await runGenerate(options);
+  });
+
 // Migrate command
 program
   .command('migrate')
-  .description('Run database migrations')
+  .description('Run database migrations (deprecated: use generate + drizzle-kit)')
   .option('--dry-run', 'Show migration SQL without executing')
   .option('--rollback', 'Rollback last migration')
   .action(async (options) => {
