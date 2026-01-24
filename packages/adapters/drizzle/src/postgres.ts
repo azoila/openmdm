@@ -65,6 +65,13 @@ export const deployActionEnum = pgEnum('mdm_deploy_action', [
   'uninstall',
 ]);
 
+export const rollbackStatusEnum = pgEnum('mdm_rollback_status', [
+  'pending',
+  'in_progress',
+  'completed',
+  'failed',
+]);
+
 // ============================================
 // Devices Table
 // ============================================
@@ -91,6 +98,7 @@ export const mdmDevices = pgTable(
       () => mdmPolicies.id,
       { onDelete: 'set null' }
     ),
+    agentVersion: varchar('agent_version', { length: 50 }), // MDM agent version
     lastHeartbeat: timestamp('last_heartbeat', { withTimezone: true }),
     lastSync: timestamp('last_sync', { withTimezone: true }),
 
@@ -366,6 +374,74 @@ export const mdmAppDeployments = pgTable(
 );
 
 // ============================================
+// App Versions Table (Version history for rollback support)
+// ============================================
+
+export const mdmAppVersions = pgTable(
+  'mdm_app_versions',
+  {
+    id: varchar('id', { length: 36 }).primaryKey(),
+    applicationId: varchar('application_id', { length: 36 })
+      .notNull()
+      .references(() => mdmApplications.id, { onDelete: 'cascade' }),
+    packageName: varchar('package_name', { length: 255 }).notNull(),
+    version: varchar('version', { length: 50 }).notNull(),
+    versionCode: integer('version_code').notNull(),
+    url: text('url').notNull(),
+    hash: varchar('hash', { length: 64 }), // SHA-256
+    size: bigint('size', { mode: 'number' }),
+    releaseNotes: text('release_notes'),
+    isMinimumVersion: boolean('is_minimum_version').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index('mdm_app_versions_application_id_idx').on(table.applicationId),
+    index('mdm_app_versions_package_name_idx').on(table.packageName),
+    uniqueIndex('mdm_app_versions_package_version_code_idx').on(
+      table.packageName,
+      table.versionCode
+    ),
+    index('mdm_app_versions_is_minimum_version_idx').on(table.isMinimumVersion),
+  ]
+);
+
+// ============================================
+// App Rollbacks Table (Rollback history and status)
+// ============================================
+
+export const mdmRollbacks = pgTable(
+  'mdm_rollbacks',
+  {
+    id: varchar('id', { length: 36 }).primaryKey(),
+    deviceId: varchar('device_id', { length: 36 })
+      .notNull()
+      .references(() => mdmDevices.id, { onDelete: 'cascade' }),
+    packageName: varchar('package_name', { length: 255 }).notNull(),
+    fromVersion: varchar('from_version', { length: 50 }).notNull(),
+    fromVersionCode: integer('from_version_code').notNull(),
+    toVersion: varchar('to_version', { length: 50 }).notNull(),
+    toVersionCode: integer('to_version_code').notNull(),
+    reason: text('reason'),
+    status: rollbackStatusEnum('status').notNull().default('pending'),
+    error: text('error'),
+    initiatedBy: varchar('initiated_by', { length: 255 }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('mdm_rollbacks_device_id_idx').on(table.deviceId),
+    index('mdm_rollbacks_package_name_idx').on(table.packageName),
+    index('mdm_rollbacks_device_package_idx').on(table.deviceId, table.packageName),
+    index('mdm_rollbacks_status_idx').on(table.status),
+    index('mdm_rollbacks_created_at_idx').on(table.createdAt),
+  ]
+);
+
+// ============================================
 // Relations
 // ============================================
 
@@ -438,6 +514,7 @@ export const mdmApplicationsRelations = relations(
   mdmApplications,
   ({ many }) => ({
     deployments: many(mdmAppDeployments),
+    versions: many(mdmAppVersions),
   })
 );
 
@@ -447,6 +524,26 @@ export const mdmAppDeploymentsRelations = relations(
     application: one(mdmApplications, {
       fields: [mdmAppDeployments.applicationId],
       references: [mdmApplications.id],
+    }),
+  })
+);
+
+export const mdmAppVersionsRelations = relations(
+  mdmAppVersions,
+  ({ one }) => ({
+    application: one(mdmApplications, {
+      fields: [mdmAppVersions.applicationId],
+      references: [mdmApplications.id],
+    }),
+  })
+);
+
+export const mdmRollbacksRelations = relations(
+  mdmRollbacks,
+  ({ one }) => ({
+    device: one(mdmDevices, {
+      fields: [mdmRollbacks.deviceId],
+      references: [mdmDevices.id],
     }),
   })
 );
@@ -466,12 +563,15 @@ export const mdmSchema = {
   mdmDeviceGroups,
   mdmPushTokens,
   mdmAppDeployments,
+  mdmAppVersions,
+  mdmRollbacks,
   // Enums
   deviceStatusEnum,
   commandStatusEnum,
   pushProviderEnum,
   deployTargetTypeEnum,
   deployActionEnum,
+  rollbackStatusEnum,
   // Relations
   mdmDevicesRelations,
   mdmPoliciesRelations,
@@ -482,6 +582,8 @@ export const mdmSchema = {
   mdmPushTokensRelations,
   mdmApplicationsRelations,
   mdmAppDeploymentsRelations,
+  mdmAppVersionsRelations,
+  mdmRollbacksRelations,
 };
 
 export type MDMSchema = typeof mdmSchema;

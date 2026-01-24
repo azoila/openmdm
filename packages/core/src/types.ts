@@ -28,6 +28,7 @@ export interface Device {
 
   // MDM State
   policyId?: string | null;
+  agentVersion?: string | null; // MDM agent version installed on device
   lastHeartbeat?: Date | null;
   lastSync?: Date | null;
 
@@ -80,6 +81,7 @@ export interface UpdateDeviceInput {
   externalId?: string | null;
   status?: DeviceStatus;
   policyId?: string | null;
+  agentVersion?: string | null;
   model?: string;
   manufacturer?: string;
   osVersion?: string;
@@ -374,6 +376,7 @@ export type CommandType =
   | 'setTimeZone'           // Set device timezone
   | 'enableAdb'             // Enable/disable ADB debugging
   | 'rollbackApp'           // Rollback to previous app version
+  | 'updateAgent'           // Update MDM agent to a new version
   | 'custom';
 
 export type CommandStatus =

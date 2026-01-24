@@ -48,6 +48,9 @@ import type {
   PolicySettings,
   InstalledApp,
   DeviceLocation,
+  AppVersion,
+  AppRollback,
+  CreateAppRollbackInput,
 } from '@openmdm/core';
 
 // Import postgres schema types
@@ -60,6 +63,8 @@ import type {
   mdmGroups,
   mdmDeviceGroups,
   mdmPushTokens,
+  mdmAppVersions,
+  mdmRollbacks,
 } from './postgres';
 
 // Type for Drizzle database instance
@@ -85,6 +90,8 @@ export interface DrizzleAdapterOptions {
     groups: typeof mdmGroups;
     deviceGroups: typeof mdmDeviceGroups;
     pushTokens: typeof mdmPushTokens;
+    appVersions?: typeof mdmAppVersions;
+    rollbacks?: typeof mdmRollbacks;
   };
 }
 
@@ -105,6 +112,8 @@ export function drizzleAdapter(
     groups,
     deviceGroups,
     pushTokens,
+    appVersions,
+    rollbacks,
   } = tables;
 
   // Helper to generate IDs
@@ -124,6 +133,7 @@ export function drizzleAdapter(
     macAddress: row.macAddress as string | null,
     androidId: row.androidId as string | null,
     policyId: row.policyId as string | null,
+    agentVersion: row.agentVersion as string | null,
     lastHeartbeat: row.lastHeartbeat as Date | null,
     lastSync: row.lastSync as Date | null,
     batteryLevel: row.batteryLevel as number | null,
@@ -221,6 +231,38 @@ export function drizzleAdapter(
     isActive: row.isActive as boolean,
     createdAt: row.createdAt as Date,
     updatedAt: row.updatedAt as Date,
+  });
+
+  // Helper to transform DB row to AppVersion
+  const toAppVersion = (row: Record<string, unknown>): AppVersion => ({
+    id: row.id as string,
+    applicationId: row.applicationId as string,
+    packageName: row.packageName as string,
+    version: row.version as string,
+    versionCode: row.versionCode as number,
+    url: row.url as string,
+    hash: row.hash as string | null,
+    size: row.size as number | null,
+    releaseNotes: row.releaseNotes as string | null,
+    isMinimumVersion: row.isMinimumVersion as boolean,
+    createdAt: row.createdAt as Date,
+  });
+
+  // Helper to transform DB row to AppRollback
+  const toAppRollback = (row: Record<string, unknown>): AppRollback => ({
+    id: row.id as string,
+    deviceId: row.deviceId as string,
+    packageName: row.packageName as string,
+    fromVersion: row.fromVersion as string,
+    fromVersionCode: row.fromVersionCode as number,
+    toVersion: row.toVersion as string,
+    toVersionCode: row.toVersionCode as number,
+    reason: row.reason as string | null,
+    status: row.status as AppRollback['status'],
+    error: row.error as string | null,
+    initiatedBy: row.initiatedBy as string | null,
+    createdAt: row.createdAt as Date,
+    completedAt: row.completedAt as Date | null,
   });
 
   return {
@@ -342,6 +384,7 @@ export function drizzleAdapter(
       if (data.externalId !== undefined) updateData.externalId = data.externalId;
       if (data.status !== undefined) updateData.status = data.status;
       if (data.policyId !== undefined) updateData.policyId = data.policyId;
+      if (data.agentVersion !== undefined) updateData.agentVersion = data.agentVersion;
       if (data.model !== undefined) updateData.model = data.model;
       if (data.manufacturer !== undefined)
         updateData.manufacturer = data.manufacturer;
@@ -896,6 +939,200 @@ export function drizzleAdapter(
           .where(eq(pushTokens.deviceId, deviceId));
       }
     },
+
+    // ============================================
+    // App Version Methods (Optional)
+    // ============================================
+
+    ...(appVersions
+      ? {
+          async listAppVersions(packageName: string): Promise<AppVersion[]> {
+            const result = await (db as any)
+              .select()
+              .from(appVersions)
+              .where(eq(appVersions.packageName, packageName))
+              .orderBy(desc(appVersions.versionCode));
+            return result.map(toAppVersion);
+          },
+
+          async createAppVersion(
+            data: Omit<AppVersion, 'id' | 'createdAt'>
+          ): Promise<AppVersion> {
+            const id = generateId();
+            const now = new Date();
+
+            const versionData = {
+              id,
+              applicationId: data.applicationId,
+              packageName: data.packageName,
+              version: data.version,
+              versionCode: data.versionCode,
+              url: data.url,
+              hash: data.hash ?? null,
+              size: data.size ?? null,
+              releaseNotes: data.releaseNotes ?? null,
+              isMinimumVersion: data.isMinimumVersion ?? false,
+              createdAt: now,
+            };
+
+            await (db as any).insert(appVersions).values(versionData);
+
+            const result = await (db as any)
+              .select()
+              .from(appVersions)
+              .where(eq(appVersions.id, id))
+              .limit(1);
+            return toAppVersion(result[0]);
+          },
+
+          async setMinimumVersion(
+            packageName: string,
+            versionCode: number
+          ): Promise<void> {
+            // First, unset all minimum versions for this package
+            await (db as any)
+              .update(appVersions)
+              .set({ isMinimumVersion: false })
+              .where(eq(appVersions.packageName, packageName));
+
+            // Then set the new minimum version
+            await (db as any)
+              .update(appVersions)
+              .set({ isMinimumVersion: true })
+              .where(
+                and(
+                  eq(appVersions.packageName, packageName),
+                  eq(appVersions.versionCode, versionCode)
+                )
+              );
+          },
+
+          async getMinimumVersion(packageName: string): Promise<AppVersion | null> {
+            const result = await (db as any)
+              .select()
+              .from(appVersions)
+              .where(
+                and(
+                  eq(appVersions.packageName, packageName),
+                  eq(appVersions.isMinimumVersion, true)
+                )
+              )
+              .limit(1);
+            return result[0] ? toAppVersion(result[0]) : null;
+          },
+        }
+      : {}),
+
+    // ============================================
+    // Rollback Methods (Optional)
+    // ============================================
+
+    ...(rollbacks
+      ? {
+          async createRollback(data: CreateAppRollbackInput): Promise<AppRollback> {
+            const id = generateId();
+            const now = new Date();
+
+            // Get current version info for the from_version fields
+            const deviceResult = await (db as any)
+              .select()
+              .from(devices)
+              .where(eq(devices.id, data.deviceId))
+              .limit(1);
+
+            const device = deviceResult[0];
+            const installedApps = (device?.installedApps as any[]) || [];
+            const currentApp = installedApps.find(
+              (app: any) => app.packageName === data.packageName
+            );
+
+            // Get target version info
+            const targetVersionResult = await (db as any)
+              .select()
+              .from(appVersions!)
+              .where(
+                and(
+                  eq(appVersions!.packageName, data.packageName),
+                  eq(appVersions!.versionCode, data.toVersionCode)
+                )
+              )
+              .limit(1);
+
+            const targetVersion = targetVersionResult[0];
+
+            const rollbackData = {
+              id,
+              deviceId: data.deviceId,
+              packageName: data.packageName,
+              fromVersion: currentApp?.version ?? 'unknown',
+              fromVersionCode: currentApp?.versionCode ?? 0,
+              toVersion: targetVersion?.version ?? 'unknown',
+              toVersionCode: data.toVersionCode,
+              reason: data.reason ?? null,
+              status: 'pending' as const,
+              initiatedBy: data.initiatedBy ?? null,
+              createdAt: now,
+            };
+
+            await (db as any).insert(rollbacks).values(rollbackData);
+
+            const result = await (db as any)
+              .select()
+              .from(rollbacks)
+              .where(eq(rollbacks.id, id))
+              .limit(1);
+            return toAppRollback(result[0]);
+          },
+
+          async updateRollback(
+            id: string,
+            data: Partial<AppRollback>
+          ): Promise<AppRollback> {
+            const updateData: Record<string, unknown> = {};
+
+            if (data.status !== undefined) updateData.status = data.status;
+            if (data.error !== undefined) updateData.error = data.error;
+            if (data.completedAt !== undefined)
+              updateData.completedAt = data.completedAt;
+
+            await (db as any)
+              .update(rollbacks)
+              .set(updateData)
+              .where(eq(rollbacks.id, id));
+
+            const result = await (db as any)
+              .select()
+              .from(rollbacks)
+              .where(eq(rollbacks.id, id))
+              .limit(1);
+            return toAppRollback(result[0]);
+          },
+
+          async listRollbacks(filter?: {
+            deviceId?: string;
+            packageName?: string;
+          }): Promise<AppRollback[]> {
+            let query = (db as any).select().from(rollbacks);
+
+            const conditions: (SQL | undefined)[] = [];
+
+            if (filter?.deviceId) {
+              conditions.push(eq(rollbacks.deviceId, filter.deviceId));
+            }
+
+            if (filter?.packageName) {
+              conditions.push(eq(rollbacks.packageName, filter.packageName));
+            }
+
+            if (conditions.length > 0) {
+              query = query.where(and(...conditions));
+            }
+
+            const result = await query.orderBy(desc(rollbacks.createdAt));
+            return result.map(toAppRollback);
+          },
+        }
+      : {}),
 
     // ============================================
     // Transaction Support
