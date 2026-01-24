@@ -107,6 +107,7 @@ export const mdmSchema: SchemaDefinition = {
           nullable: true,
           references: { table: 'mdm_policies', column: 'id', onDelete: 'set null' },
         },
+        agent_version: { type: 'string', nullable: true }, // MDM agent version installed on device
         last_heartbeat: { type: 'datetime', nullable: true },
         last_sync: { type: 'datetime', nullable: true },
 
