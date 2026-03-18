@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createMDM } from '../src/index';
+import { createMDM, CommandNotFoundError } from '../src/index';
 import type { DatabaseAdapter, PushAdapter, Device, Policy, Command } from '../src/types';
 
 // Mock Database Adapter
@@ -118,7 +118,7 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
     },
     async updateCommand(id: string, data) {
       const command = commands.get(id);
-      if (!command) throw new Error('Command not found');
+      if (!command) return null;
       const updated = { ...command, ...data };
       commands.set(id, updated);
       return updated;
@@ -396,6 +396,30 @@ describe('createMDM', () => {
 
       const pending = await mdm.commands.getPending(device.id);
       expect(pending.length).toBe(2);
+    });
+
+    it('should throw CommandNotFoundError when acknowledging a deleted command', async () => {
+      await expect(
+        mdm.commands.acknowledge('nonexistent-command-id')
+      ).rejects.toThrow(CommandNotFoundError);
+    });
+
+    it('should throw CommandNotFoundError when completing a deleted command', async () => {
+      await expect(
+        mdm.commands.complete('nonexistent-command-id', { success: true })
+      ).rejects.toThrow(CommandNotFoundError);
+    });
+
+    it('should throw CommandNotFoundError when failing a deleted command', async () => {
+      await expect(
+        mdm.commands.fail('nonexistent-command-id', 'some error')
+      ).rejects.toThrow(CommandNotFoundError);
+    });
+
+    it('should throw CommandNotFoundError when cancelling a deleted command', async () => {
+      await expect(
+        mdm.commands.cancel('nonexistent-command-id')
+      ).rejects.toThrow(CommandNotFoundError);
     });
   });
 

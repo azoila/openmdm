@@ -77,6 +77,7 @@ import type {
 import {
   DeviceNotFoundError,
   ApplicationNotFoundError,
+  CommandNotFoundError,
   EnrollmentError,
 } from './types';
 import { createWebhookManager } from './webhooks';
@@ -628,7 +629,11 @@ export function createMDM(config: MDMConfig): MDMInstance {
     },
 
     async cancel(id: string): Promise<Command> {
-      return database.updateCommand(id, { status: 'cancelled' });
+      const command = await database.updateCommand(id, { status: 'cancelled' });
+      if (!command) {
+        throw new CommandNotFoundError(id);
+      }
+      return command;
     },
 
     async acknowledge(id: string): Promise<Command> {
@@ -636,6 +641,10 @@ export function createMDM(config: MDMConfig): MDMInstance {
         status: 'acknowledged',
         acknowledgedAt: new Date(),
       });
+
+      if (!command) {
+        throw new CommandNotFoundError(id);
+      }
 
       const device = await database.findDevice(command.deviceId);
       if (device) {
@@ -652,6 +661,10 @@ export function createMDM(config: MDMConfig): MDMInstance {
         completedAt: new Date(),
       });
 
+      if (!command) {
+        throw new CommandNotFoundError(id);
+      }
+
       const device = await database.findDevice(command.deviceId);
       if (device) {
         await emit('command.completed', { device, command, result });
@@ -666,6 +679,10 @@ export function createMDM(config: MDMConfig): MDMInstance {
         error,
         completedAt: new Date(),
       });
+
+      if (!command) {
+        throw new CommandNotFoundError(id);
+      }
 
       const device = await database.findDevice(command.deviceId);
       if (device) {

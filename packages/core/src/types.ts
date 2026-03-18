@@ -834,7 +834,7 @@ export interface DatabaseAdapter {
   findCommand(id: string): Promise<Command | null>;
   listCommands(filter?: CommandFilter): Promise<Command[]>;
   createCommand(data: SendCommandInput): Promise<Command>;
-  updateCommand(id: string, data: Partial<Command>): Promise<Command>;
+  updateCommand(id: string, data: Partial<Command>): Promise<Command | null>;
   getPendingCommands(deviceId: string): Promise<Command[]>;
 
   // Events
@@ -1820,6 +1820,12 @@ export class PolicyNotFoundError extends MDMError {
 export class ApplicationNotFoundError extends MDMError {
   constructor(identifier: string) {
     super(`Application not found: ${identifier}`, 'APPLICATION_NOT_FOUND', 404);
+  }
+}
+
+export class CommandNotFoundError extends MDMError {
+  constructor(commandId: string) {
+    super(`Command not found: ${commandId}`, 'COMMAND_NOT_FOUND', 404);
   }
 }
 

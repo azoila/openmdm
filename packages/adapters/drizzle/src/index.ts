@@ -675,7 +675,7 @@ export function drizzleAdapter(
       return this.findCommand(id) as Promise<Command>;
     },
 
-    async updateCommand(id: string, data: Partial<Command>): Promise<Command> {
+    async updateCommand(id: string, data: Partial<Command>): Promise<Command | null> {
       const updateData: Record<string, unknown> = {};
 
       if (data.status !== undefined) updateData.status = data.status;
@@ -692,7 +692,7 @@ export function drizzleAdapter(
         .set(updateData)
         .where(eq(commands.id, id));
 
-      return this.findCommand(id) as Promise<Command>;
+      return this.findCommand(id);
     },
 
     async getPendingCommands(deviceId: string): Promise<Command[]> {

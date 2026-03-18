@@ -4,6 +4,7 @@ import {
   DeviceNotFoundError,
   PolicyNotFoundError,
   ApplicationNotFoundError,
+  CommandNotFoundError,
   EnrollmentError,
   AuthenticationError,
   AuthorizationError,
@@ -54,6 +55,16 @@ describe('Error Types', () => {
 
       expect(error.message).toBe('Application not found: com.example.app');
       expect(error.code).toBe('APPLICATION_NOT_FOUND');
+      expect(error.statusCode).toBe(404);
+    });
+  });
+
+  describe('CommandNotFoundError', () => {
+    it('should have correct message and status', () => {
+      const error = new CommandNotFoundError('cmd-789');
+
+      expect(error.message).toBe('Command not found: cmd-789');
+      expect(error.code).toBe('COMMAND_NOT_FOUND');
       expect(error.statusCode).toBe(404);
     });
   });
