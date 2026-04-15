@@ -28,13 +28,17 @@
     "packages/plugins/*",
     "examples/*",
     "apps/*",
-    "docs"
+    "docs",
+    "tests/*"
   ],
   "scripts": {
     "build": "turbo build",
     "dev": "turbo dev",
     "lint": "turbo lint",
     "test": "turbo test",
+    "test:e2e": "pnpm --filter @openmdm/tests-e2e test",
+    "test:e2e:up": "docker compose -f docker-compose.test.yml up -d postgres",
+    "test:e2e:down": "docker compose -f docker-compose.test.yml down",
     "typecheck": "turbo typecheck",
     "clean": "turbo clean && rm -rf node_modules",
     "changeset": "changeset",

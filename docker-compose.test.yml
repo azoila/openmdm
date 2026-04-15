@@ -1,0 +1,32 @@
+# Local + CI integration test services.
+#
+# Spins up a Postgres instance the e2e test suite connects to. Used by
+# `pnpm test:e2e` (local) and the `e2e` job in .github/workflows/ci.yml.
+# Deliberately minimal — one service, default creds, exposed on a
+# non-default port so it doesn't collide with a developer's local
+# Postgres.
+#
+# Not intended for running the application; this file is scoped to tests
+# only. The production deployment story lives in your own compose or k8s
+# manifests.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: openmdm-test-postgres
+    environment:
+      POSTGRES_USER: openmdm
+      POSTGRES_PASSWORD: openmdm
+      POSTGRES_DB: openmdm_test
+    ports:
+      - '54329:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U openmdm -d openmdm_test']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
+    tmpfs:
+      # Run the data directory in tmpfs so tests start from a clean
+      # slate every run and nothing persists between invocations.
+      - /var/lib/postgresql/data
