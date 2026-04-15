@@ -4,7 +4,7 @@
 > It is generated from the MDX sources at docs/content/docs. Paste it into
 > an LLM context window to ask questions without fetching pages individually.
 
-> Generated: 2026-04-15T14:27:36.391Z
+> Generated: 2026-04-15T16:01:36.506Z
 
 ---
 
@@ -657,6 +657,201 @@ During local development, you usually don't have a real Android agent handy. The
 
 - **[Agent Wire Protocol](/docs/concepts/agent-protocol)** — what a failed enrollment looks like on the wire and how v1/v2 clients handle it.
 - **[Architecture](/docs/concepts/architecture)** — the full data flow including the heartbeat loop that follows enrollment.
+
+---
+
+## Operations
+
+*URL: https://openmdm.dev/docs/concepts/operations*
+
+*Logging, health probes, and what you need to know to run OpenMDM in production.*
+
+# Operations
+
+This page covers the operational surface area of OpenMDM — the parts you need to wire up *before* your first production deploy, not after your first production incident. Specifically: how OpenMDM logs, how it reports health, and what your orchestrator or load balancer needs to know.
+
+## Structured logging
+
+OpenMDM uses a **structured logger** for every internal message — event-bus errors, webhook delivery failures, plugin init results, middleware exceptions. The logger is configurable via `createMDM`, and the interface is a strict subset of the pino/winston/bunyan shape so any of those can be passed directly.
+
+### The default
+
+If you don't pass a `logger`, OpenMDM uses a console-backed fallback. It prefixes every line with `[openmdm]` (or `[openmdm:component]` for plugin-scoped logs) and renders the structured context as a JSON fragment at the end of the line:
+
+```
+[openmdm] Plugin initialized {"plugin":"kiosk"}
+[openmdm:webhooks] Webhook delivery failed {"endpointId":"analytics","statusCode":503,"retryCount":3,"err":"HTTP 503: Service Unavailable"}
+```
+
+This is fine for local development and for small single-process deployments. It is *not* what you want in production — you want logs flowing into your host application's logging pipeline so they pick up the same correlation IDs, filters, and retention that everything else has.
+
+### Passing your own logger
+
+Any logger that implements the `Logger` interface works:
+
+```typescript title="src/mdm.ts"
+import { createMDM } from '@openmdm/core';
+import pino from 'pino';
+
+const log = pino({
+  level: process.env.LOG_LEVEL ?? 'info',
+  // Whatever transport config your app already uses.
+});
+
+export const mdm = createMDM({
+  database: drizzleAdapter(db, { tables: mdmSchema }),
+  push: fcmPushAdapter({ ... }),
+  enrollment: { deviceSecret: process.env.DEVICE_SECRET! },
+  auth: { deviceTokenSecret: process.env.JWT_SECRET! },
+
+  // Pino is call-compatible with the Logger interface directly.
+  logger: log,
+});
+```
+
+Pino's `.child({...})` returns a new logger with bound fields, which is exactly what OpenMDM calls for plugin-scoped logs. Winston is similar; bunyan too. Any logger with the shape `{ debug, info, warn, error, child }` where each level accepts `(context, message)` or `(message)` will Just Work.
+
+### Silencing OpenMDM
+
+For tests or hosts where OpenMDM log lines are noise:
+
+```typescript
+import { createMDM, createSilentLogger } from '@openmdm/core';
+
+const mdm = createMDM({
+  // ...
+  logger: createSilentLogger(),
+});
+```
+
+The silent logger is a no-op at every level. OpenMDM still tracks errors internally and throws them where it used to, but nothing lands on stdout/stderr.
+
+### What OpenMDM actually logs
+
+The internal log volume is low — OpenMDM is not a chatty library, and most operational work happens in the event bus where your own handlers do the reporting. Concretely, you'll see log lines for:
+
+| Surface | Level | What triggers it |
+|---|---|---|
+| Plugin init | `info` | Each plugin's `onInit` hook completes |
+| Plugin init failure | `error` | A plugin's `onInit` throws |
+| Event persist failure | `error` | Database write of an `mdm_events` row fails |
+| Webhook delivery failure | `error` | A webhook endpoint returns 4xx/5xx or times out after retries |
+| Event handler threw | `error` | Your `mdm.on(...)` handler throws |
+| Hono adapter error | `error` | An unhandled exception reaches the adapter's `onError` handler |
+| Push stub | `debug` | The built-in stub push adapter fires (dev-only path) |
+| Kiosk fallback warning | `warn` | The kiosk plugin starts without `pluginStorage` configured |
+
+There's no `info`-level log for every heartbeat, every command, or every policy delivery — those are high-cardinality operational events that belong in your event handlers, where you can control the log volume and shape per-deployment.
+
+## Health probes
+
+The Hono adapter exposes two unauthenticated endpoints:
+
+### `/healthz` — liveness
+
+Returns `200 OK` iff the process is alive and serving HTTP. It does **not** touch the database or the push adapter.
+
+```http
+GET /healthz
+
+200 OK
+Content-Type: application/json
+
+{"status":"ok"}
+```
+
+**Use this as your Kubernetes liveness probe, your ECS health check, or your load balancer's "is this instance dead" signal.** The contract is deliberately pure: if your database is degraded, your process is still alive and should not be killed by the orchestrator. Killing it would force a restart, and a restart does not fix a broken database — it just adds one more unavailable replica.
+
+### `/readyz` — readiness
+
+Returns `200 OK` iff the process can actually serve traffic, which means the database round-trip succeeds. Returns `503 Service Unavailable` otherwise with a per-check breakdown.
+
+```http
+GET /readyz
+
+200 OK
+Content-Type: application/json
+
+{
+  "status": "ok",
+  "checks": {
+    "database": { "ok": true },
+    "push": { "ok": true }
+  }
+}
+```
+
+On failure:
+
+```http
+GET /readyz
+
+503 Service Unavailable
+Content-Type: application/json
+
+{
+  "status": "degraded",
+  "checks": {
+    "database": { "ok": false, "error": "connection refused" },
+    "push": { "ok": true }
+  }
+}
+```
+
+**Use this as your Kubernetes readiness probe or your load balancer's "should I send this instance traffic" signal.** A 503 here should remove the instance from rotation but **not** restart it — readiness faults are typically transient (a Postgres reboot, a network blip) and fix themselves without intervention.
+
+### Readiness probe frequency
+
+The database check is a `SELECT ... LIMIT 1` through the adapter, which is cheap but not free. At fleet scale:
+
+- **Kubernetes default** (every 10s) is fine for most deployments.
+- **Every 1s** is overkill — you'll hit the database thousands of times per day just for health checks.
+- **Every 30s or more** is perfectly reasonable if your orchestrator already detects connection failures quickly through other means.
+
+Push adapter checks are currently shallow (the adapter's presence, not a live round-trip) — a full push-adapter probe would rate-limit you against FCM if it ran on every readiness tick. That's a tradeoff: detailed health costs quota. Revisit if you want finer-grained readiness.
+
+## Putting it together: Kubernetes example
+
+```yaml title="k8s/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: my-app:latest
+          ports:
+            - containerPort: 3000
+          livenessProbe:
+            httpGet:
+              path: /mdm/healthz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /mdm/readyz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 2
+```
+
+The `/mdm/` prefix assumes you mounted `honoAdapter(mdm)` under `/mdm` as shown in the [Quick Start](/docs/quick-start). Adjust for your actual mount point.
+
+## What is deliberately not here
+
+A few things operators ask for that OpenMDM **does not currently ship**:
+
+- **Prometheus/OTEL metrics.** The surface exists as a gap, but the metric names and labels deserve a design pass of their own. Designing them up front is more valuable than slapping `prom-client` on top of whatever call sites are convenient today. Tracked as a follow-up.
+- **Distributed tracing integration.** Same story. If you need it now, wire it at your HTTP layer (Hono has OTEL middleware) and at your database layer (Drizzle has a tracing interface) — OpenMDM will show up in both without any library-level wiring.
+- **Per-request request IDs in internal logs.** If your HTTP layer sets an `x-request-id` header and your logger's `child()` can bind it per-request, OpenMDM's logs will inherit it naturally through the logger you pass in. We don't do this for you because the host's request-id strategy is the host's to own.
+
+If you want any of these to jump the queue, file an issue with the concrete use case — "we need to see every command's delivery latency in our dashboards" is a much better driver than "add metrics, please."
 
 ---
 

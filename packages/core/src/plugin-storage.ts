@@ -19,7 +19,11 @@ export function createPluginStorageAdapter(db: DatabaseAdapter): PluginStorageAd
       }
 
       // Fallback: not supported
-      console.warn('Plugin storage not supported by database adapter');
+      // Silently no-op: the plugin-storage contract treats missing
+      // adapter methods as "not configured", which is the same
+      // branch plugins handle via their in-memory fallback. A warn
+      // log here would flood production with one line per hit.
+      //
       return null;
     },
 
@@ -29,7 +33,11 @@ export function createPluginStorageAdapter(db: DatabaseAdapter): PluginStorageAd
         return;
       }
 
-      console.warn('Plugin storage not supported by database adapter');
+      // Silently no-op: the plugin-storage contract treats missing
+      // adapter methods as "not configured", which is the same
+      // branch plugins handle via their in-memory fallback. A warn
+      // log here would flood production with one line per hit.
+      //
     },
 
     async delete(pluginName: string, key: string): Promise<void> {
@@ -38,7 +46,11 @@ export function createPluginStorageAdapter(db: DatabaseAdapter): PluginStorageAd
         return;
       }
 
-      console.warn('Plugin storage not supported by database adapter');
+      // Silently no-op: the plugin-storage contract treats missing
+      // adapter methods as "not configured", which is the same
+      // branch plugins handle via their in-memory fallback. A warn
+      // log here would flood production with one line per hit.
+      //
     },
 
     async list(pluginName: string, prefix?: string): Promise<string[]> {
@@ -46,7 +58,11 @@ export function createPluginStorageAdapter(db: DatabaseAdapter): PluginStorageAd
         return db.listPluginKeys(pluginName, prefix);
       }
 
-      console.warn('Plugin storage not supported by database adapter');
+      // Silently no-op: the plugin-storage contract treats missing
+      // adapter methods as "not configured", which is the same
+      // branch plugins handle via their in-memory fallback. A warn
+      // log here would flood production with one line per hit.
+      //
       return [];
     },
 
@@ -56,7 +72,11 @@ export function createPluginStorageAdapter(db: DatabaseAdapter): PluginStorageAd
         return;
       }
 
-      console.warn('Plugin storage not supported by database adapter');
+      // Silently no-op: the plugin-storage contract treats missing
+      // adapter methods as "not configured", which is the same
+      // branch plugins handle via their in-memory fallback. A warn
+      // log here would flood production with one line per hit.
+      //
     },
   };
 }

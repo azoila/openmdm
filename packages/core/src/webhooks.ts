@@ -10,7 +10,9 @@ import type {
   WebhookEndpoint,
   EventType,
   MDMEvent,
+  Logger,
 } from './types';
+import { createSilentLogger } from './logger';
 
 // ============================================
 // Types
@@ -77,9 +79,13 @@ const DEFAULT_RETRY_CONFIG = {
 /**
  * Create a webhook manager instance
  */
-export function createWebhookManager(config: WebhookConfig): WebhookManager {
+export function createWebhookManager(
+  config: WebhookConfig,
+  logger: Logger = createSilentLogger(),
+): WebhookManager {
   const endpoints = new Map<string, WebhookEndpoint>();
   const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...config.retry };
+  const log = logger.child({ component: 'webhooks' });
 
   // Initialize with configured endpoints
   if (config.endpoints) {
@@ -232,9 +238,14 @@ export function createWebhookManager(config: WebhookConfig): WebhookManager {
       // Log failures
       for (const result of results) {
         if (!result.success) {
-          console.error(
-            `[OpenMDM] Webhook delivery failed to endpoint ${result.endpointId}:`,
-            result.error
+          log.error(
+            {
+              endpointId: result.endpointId,
+              statusCode: result.statusCode,
+              retryCount: result.retryCount,
+              err: result.error,
+            },
+            'Webhook delivery failed',
           );
         }
       }

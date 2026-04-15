@@ -8,6 +8,7 @@
 - [Architecture](https://openmdm.dev/docs/concepts/architecture): How OpenMDM fits into your backend and how data flows between your server and devices.
 - [Commands vs Policies](https://openmdm.dev/docs/concepts/commands-and-policies): The single most confusing distinction in OpenMDM. Read this before writing anything.
 - [Enrollment](https://openmdm.dev/docs/concepts/enrollment): How a device proves it's allowed to join the fleet and how OpenMDM validates it.
+- [Operations](https://openmdm.dev/docs/concepts/operations): Logging, health probes, and what you need to know to run OpenMDM in production.
 - [Installation](https://openmdm.dev/docs/installation): Install OpenMDM, set up your database schema, and create your first MDMInstance.
 - [Introduction](https://openmdm.dev/docs/introduction): OpenMDM is an embeddable Mobile Device Management SDK you drop into your existing TypeScript application.
 - [Quick Start](https://openmdm.dev/docs/quick-start): From nothing to an enrolled device in about 15 minutes.
