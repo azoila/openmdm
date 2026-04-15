@@ -1,5 +1,12 @@
 # @openmdm/plugin-geofence
 
+## 0.2.3
+
+### Patch Changes
+
+- Updated dependencies [[`41b87bd`](https://github.com/azoila/openmdm/commit/41b87bd6f71b54fba4a9a67e6d8443006a685c98), [`c713954`](https://github.com/azoila/openmdm/commit/c71395403cb24b136e54a7d98662a7f599f1297a)]:
+  - @openmdm/core@0.6.0
+
 ## 0.2.2
 
 ### Patch Changes

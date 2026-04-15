@@ -1,5 +1,23 @@
 # @openmdm/drizzle-adapter
 
+## 0.3.1
+
+### Patch Changes
+
+- [`c713954`](https://github.com/azoila/openmdm/commit/c71395403cb24b136e54a7d98662a7f599f1297a) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - fix: Return 404 instead of 500 when command not found on ack/complete/fail
+
+  When a device is freed via the admin API, FK CASCADE deletes associated commands.
+  If the device agent then tries to ack or complete a deleted command, the server
+  crashed with `TypeError: Cannot read properties of null (reading 'deviceId')`.
+
+  - Add `CommandNotFoundError` class (404 status code)
+  - Add null checks in `acknowledge()`, `complete()`, `fail()`, `cancel()`
+  - Fix unsafe cast in drizzle adapter `updateCommand()` return type
+  - Change `DatabaseAdapter.updateCommand` return type to `Command | null`
+
+- Updated dependencies [[`41b87bd`](https://github.com/azoila/openmdm/commit/41b87bd6f71b54fba4a9a67e6d8443006a685c98), [`c713954`](https://github.com/azoila/openmdm/commit/c71395403cb24b136e54a7d98662a7f599f1297a)]:
+  - @openmdm/core@0.6.0
+
 ## 0.3.0
 
 ### Minor Changes
