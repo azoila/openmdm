@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/tests-e2e",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "description": "End-to-end integration tests that run against real infrastructure (Postgres from docker-compose.test.yml). Not published.",

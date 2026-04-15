@@ -1,5 +1,12 @@
 # @openmdm/push-fcm
 
+## 0.2.5
+
+### Patch Changes
+
+- Updated dependencies [[`0a58d6d`](https://github.com/azoila/openmdm/commit/0a58d6de0641c095af46cb55e871c5dafab7dff5)]:
+  - @openmdm/core@0.8.0
+
 ## 0.2.4
 
 ### Patch Changes
