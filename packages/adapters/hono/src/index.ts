@@ -37,6 +37,23 @@ import type {
   AuthenticationError,
   AuthorizationError,
 } from '@openmdm/core';
+import {
+  agentOkResponse,
+  agentReauth,
+  agentUnenroll,
+  isAgentV2,
+} from './agent-envelope';
+
+// Re-export wire-protocol helpers so consumers can build custom
+// agent endpoints without depending directly on @openmdm/core.
+export {
+  agentOkResponse,
+  agentReauth,
+  agentUnenroll,
+  agentRetry,
+  agentFailResponse,
+  isAgentV2,
+} from './agent-envelope';
 
 /**
  * Context variables set by OpenMDM middlewares
@@ -130,18 +147,33 @@ export function honoAdapter(
     return c.json({ error: 'Internal server error' }, 500);
   });
 
-  // Device authentication middleware
+  // Device authentication middleware.
+  //
+  // Under protocol v2 (agent sends `X-Openmdm-Protocol: 2`), auth
+  // failures become HTTP 200 envelopes carrying `action: "reauth"`,
+  // so clients have a single, unambiguous handler for "your token
+  // isn't working — refresh it, don't wipe yourself". Under v1, the
+  // legacy 401 is preserved so old fleets keep working during
+  // rollout.
   const deviceAuth: MiddlewareHandler = async (c, next) => {
     const token = c.req.header('Authorization')?.replace('Bearer ', '');
     const deviceId = c.req.header('X-Device-Id');
 
     if (!token && !deviceId) {
+      if (isAgentV2(c)) {
+        c.res = agentReauth(c, 'Device authentication required');
+        return;
+      }
       throw new HTTPException(401, { message: 'Device authentication required' });
     }
 
     if (token) {
       const result = await mdm.verifyDeviceToken(token);
       if (!result) {
+        if (isAgentV2(c)) {
+          c.res = agentReauth(c, 'Invalid or expired device token');
+          return;
+        }
         throw new HTTPException(401, { message: 'Invalid device token' });
       }
       c.set('deviceId', result.deviceId);
@@ -207,7 +239,9 @@ export function honoAdapter(
         result.serverUrl = `${url.protocol}//${url.host}`;
       }
 
-      return c.json(result, 201);
+      // Legacy v1 clients expect 201 on successful enrollment; v2
+      // clients see HTTP 200 with the envelope.
+      return agentOkResponse(c, result, { legacyStatus: 201 });
     });
 
     // Device heartbeat
@@ -231,7 +265,7 @@ export function honoAdapter(
         policyUpdate = await mdm.policies.get(device.policyId);
       }
 
-      return c.json({
+      return agentOkResponse(c, {
         success: true,
         pendingCommands: pendingCommands,
         policyUpdate: policyUpdate,
@@ -244,7 +278,13 @@ export function honoAdapter(
       const device = await mdm.devices.get(deviceId);
 
       if (!device) {
-        throw new HTTPException(404, { message: 'Device not found' });
+        // v2 clients should NOT interpret this as "wipe local state" —
+        // that's what the whole envelope exists to prevent. We emit
+        // `unenroll` here because this response only fires after the
+        // token was already validated by deviceAuth; the device id
+        // belongs to a row that genuinely no longer exists, which is
+        // the narrow case where terminal action is correct.
+        return agentUnenroll(c, 'Device not found');
       }
 
       let policy = null;
@@ -254,7 +294,7 @@ export function honoAdapter(
         policy = await mdm.policies.getDefault();
       }
 
-      return c.json({
+      return agentOkResponse(c, {
         device: {
           id: device.id,
           enrollmentId: device.enrollmentId,
@@ -275,14 +315,14 @@ export function honoAdapter(
         token: body.token,
       });
 
-      return c.json({ status: 'ok' });
+      return agentOkResponse(c, { status: 'ok' });
     });
 
     // Acknowledge command
     enrollment.post('/commands/:id/ack', deviceAuth, async (c) => {
       const commandId = c.req.param('id');
       const command = await mdm.commands.acknowledge(commandId);
-      return c.json(command);
+      return agentOkResponse(c, command);
     });
 
     // Complete command
@@ -290,7 +330,7 @@ export function honoAdapter(
       const commandId = c.req.param('id');
       const body = await c.req.json<{ success: boolean; message?: string; data?: unknown }>();
       const command = await mdm.commands.complete(commandId, body);
-      return c.json(command);
+      return agentOkResponse(c, command);
     });
 
     // Fail command
@@ -298,7 +338,7 @@ export function honoAdapter(
       const commandId = c.req.param('id');
       const body = await c.req.json<{ error: string }>();
       const command = await mdm.commands.fail(commandId, body.error);
-      return c.json(command);
+      return agentOkResponse(c, command);
     });
 
     app.route('/agent', enrollment);

@@ -92,6 +92,7 @@ import { createPluginStorageAdapter, createMemoryPluginStorageAdapter } from './
 // Re-export all types
 export * from './types';
 export * from './schema';
+export * from './agent-protocol';
 export { createWebhookManager, verifyWebhookSignature } from './webhooks';
 export type { WebhookPayload } from './webhooks';
 
