@@ -1,202 +1,232 @@
 ---
 title: Quick Start
-description: Get up and running with OpenMDM in minutes.
+description: From nothing to an enrolled device in about 15 minutes.
 ---
 
 # Quick Start
 
-This guide will walk you through creating your first MDM server and enrolling a device.
+By the end of this page, you will have:
 
-## 1. Create the MDM Server
+1. A Hono server with OpenMDM's routes mounted.
+2. A device enrolled in development mode (no real Android agent needed for the first pass).
+3. A policy applied and a remote command queued.
 
-First, set up your MDM server instance:
+This follows on from [Installation](/docs/installation) — you should already have `src/mdm.ts` exporting a configured `MDMInstance`.
 
-```typescript title="src/mdm.ts"
-import { createMDMServer } from '@openmdm/core';
-import { sqliteStorage } from '@openmdm/storage-sqlite';
-import { fcmPush } from '@openmdm/push-fcm';
+## 1. Mount the HTTP routes
 
-export const mdm = createMDMServer({
-  storage: sqliteStorage({ filename: './mdm.db' }),
-  push: fcmPush({
-    projectId: process.env.FIREBASE_PROJECT_ID!
-  }),
-});
-```
+Create your Hono entrypoint and `.route('/mdm', honoAdapter(mdm))` to expose every OpenMDM endpoint under `/mdm`:
 
-## 2. Create an Enrollment Token
-
-Generate an enrollment token that devices will use to register:
-
-```typescript
-const token = await mdm.enrollment.createToken({
-  // Token expires in 24 hours
-  expiresIn: '24h',
-
-  // Optional: Pre-assign a policy
-  policyId: 'default-policy',
-
-  // Optional: Limit number of enrollments
-  maxEnrollments: 10,
-});
-
-console.log('Enrollment Token:', token.value);
-console.log('QR Code URL:', token.qrCodeUrl);
-```
-
-## 3. Enroll a Device
-
-When a device scans the QR code or enters the token, it will be enrolled:
-
-```typescript
-// This happens automatically when the device agent connects
-const device = await mdm.devices.enroll({
-  enrollmentToken: 'your-token-here',
-  deviceInfo: {
-    manufacturer: 'Samsung',
-    model: 'Galaxy S24',
-    osVersion: '14',
-    serialNumber: 'ABC123',
-  },
-});
-
-console.log('Device enrolled:', device.id);
-```
-
-## 4. Apply a Policy
-
-Create and apply a policy to manage the device:
-
-```typescript
-// Create a policy
-const policy = await mdm.policies.create({
-  name: 'Kiosk Policy',
-  settings: {
-    kioskMode: {
-      enabled: true,
-      allowedApps: ['com.example.kioskapp'],
-    },
-    security: {
-      requirePassword: true,
-      minPasswordLength: 6,
-    },
-    restrictions: {
-      allowCamera: false,
-      allowScreenCapture: false,
-    },
-  },
-});
-
-// Apply to the device
-await mdm.devices.applyPolicy(device.id, policy.id);
-```
-
-## 5. Send Commands
-
-Execute remote commands on the device:
-
-```typescript
-// Lock the device
-await mdm.commands.send(device.id, {
-  type: 'LOCK',
-  message: 'This device has been locked by IT.',
-});
-
-// Install an app
-await mdm.commands.send(device.id, {
-  type: 'INSTALL_APP',
-  packageName: 'com.example.app',
-  downloadUrl: 'https://example.com/app.apk',
-});
-
-// Reboot the device
-await mdm.commands.send(device.id, {
-  type: 'REBOOT',
-});
-```
-
-## 6. Monitor Devices
-
-Query device status and information:
-
-```typescript
-// List all devices
-const devices = await mdm.devices.list({
-  status: 'online',
-  limit: 50,
-});
-
-// Get device details
-const device = await mdm.devices.get('device-id');
-console.log('Last seen:', device.lastSeen);
-console.log('Battery:', device.batteryLevel);
-console.log('Policy:', device.policyId);
-
-// Get device location (if enabled)
-const location = await mdm.devices.getLocation('device-id');
-console.log('Location:', location.latitude, location.longitude);
-```
-
-## Complete Example
-
-Here's a complete example integrating with an Express server:
-
-```typescript title="src/index.ts"
-import express from 'express';
+```typescript title="src/server.ts"
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { honoAdapter } from '@openmdm/hono';
 import { mdm } from './mdm';
 
-const app = express();
-app.use(express.json());
+const app = new Hono();
 
-// Create enrollment token
-app.post('/api/enrollment/token', async (req, res) => {
-  const token = await mdm.enrollment.createToken({
-    expiresIn: '24h',
-  });
-  res.json(token);
+// Your own routes can live alongside OpenMDM's.
+app.get('/', (c) => c.text('hello from my app'));
+
+// All agent + admin endpoints. See the Agent Wire Protocol page
+// for what actually lives under /mdm/agent/*.
+app.route('/mdm', honoAdapter(mdm));
+
+serve({ fetch: app.fetch, port: 3000 });
+console.log('listening on http://localhost:3000');
+```
+
+Start it:
+
+```bash
+pnpm tsx src/server.ts
+```
+
+You should see requests to `/mdm/agent/config` return a 401 (no device token yet) — that's the middleware working.
+
+## 2. Create a policy
+
+Before enrolling anything, create a baseline policy devices will apply on first contact. For a working example, use kiosk mode that locks the device to a single test app:
+
+```typescript title="scripts/seed-policy.ts"
+import { mdm } from '../src/mdm';
+
+const policy = await mdm.policies.create({
+  name: 'Default Kiosk',
+  description: 'Locks devices to the reference app',
+  isDefault: true,
+  settings: {
+    kioskMode: true,
+    mainApp: 'com.example.kioskapp',
+    lockStatusBar: true,
+    lockNavigationBar: true,
+  },
 });
 
-// List devices
-app.get('/api/devices', async (req, res) => {
-  const devices = await mdm.devices.list();
-  res.json(devices);
+console.log('Created policy:', policy.id);
+```
+
+```bash
+pnpm tsx scripts/seed-policy.ts
+```
+
+Because `isDefault: true`, any device that enrolls without an explicit policy assignment will receive this one on its first heartbeat.
+
+## 3. Subscribe to events
+
+Event handlers live in the same process as the SDK. Register them at boot time so you know what the fleet is doing:
+
+```typescript title="src/mdm.ts (append)"
+mdm.on('device.enrolled', async (event) => {
+  console.log(`[mdm] ${event.payload.device.id} just enrolled`);
 });
 
-// Send command to device
-app.post('/api/devices/:id/commands', async (req, res) => {
-  const { id } = req.params;
-  const command = req.body;
-
-  await mdm.commands.send(id, command);
-  res.json({ success: true });
+mdm.on('device.heartbeat', async (event) => {
+  console.log(
+    `[mdm] ${event.payload.device.id} heartbeat, battery ${event.payload.heartbeat.batteryLevel}%`,
+  );
 });
 
-// MDM webhook for device events
-app.post('/api/mdm/webhook', async (req, res) => {
-  const event = req.body;
-
-  switch (event.type) {
-    case 'device.enrolled':
-      console.log('New device enrolled:', event.deviceId);
-      break;
-    case 'device.policy_applied':
-      console.log('Policy applied:', event.policyId);
-      break;
-    case 'command.completed':
-      console.log('Command completed:', event.commandId);
-      break;
-  }
-
-  res.json({ received: true });
-});
-
-app.listen(3000, () => {
-  console.log('MDM server running on http://localhost:3000');
+mdm.on('command.completed', async (event) => {
+  console.log(`[mdm] command ${event.payload.commandId} done`);
 });
 ```
 
-## Next Steps
+See the full list in [Events](/docs/reference/events).
 
-- [Policies](/docs/policies) - Learn about policy configuration
-- [Commands](/docs/commands) - Explore available device commands
-- [Webhooks](/docs/webhooks) - Set up event notifications
+## 4. Enroll a test device
+
+In production, devices enroll via a QR code scanned by the Android agent. For local development, call the manager directly:
+
+```typescript title="scripts/enroll-test-device.ts"
+import { mdm } from '../src/mdm';
+import { createHmac } from 'crypto';
+
+const SECRET = process.env.DEVICE_SECRET!;
+const timestamp = new Date().toISOString();
+
+// The canonical signing form is maintained by @openmdm/client for
+// the real agent. Here we inline it for a dev harness.
+const request = {
+  model: 'Pixel 7',
+  manufacturer: 'Google',
+  osVersion: '14',
+  serialNumber: 'DEV-SN-0001',
+  imei: '',
+  macAddress: '',
+  androidId: 'dev-android-0001',
+  method: 'manual' as const,
+  timestamp,
+};
+
+const message = [
+  request.model,
+  request.manufacturer,
+  request.osVersion,
+  request.serialNumber,
+  request.imei,
+  request.macAddress,
+  request.androidId,
+  request.method,
+  request.timestamp,
+].join('|');
+
+const signature = createHmac('sha256', SECRET).update(message).digest('hex');
+
+const response = await mdm.enroll({ ...request, signature });
+console.log('Enrolled:', response.deviceId);
+console.log('Device token:', response.token);
+```
+
+> **Why so manual?** Because the enrollment signature is the library's security boundary, not a convenience helper. We show the real canonical form here so you can audit it. Production agents use `generateEnrollmentSignature()` from `@openmdm/client`, which computes the same thing.
+
+Run it:
+
+```bash
+pnpm tsx scripts/enroll-test-device.ts
+```
+
+You should see the `[mdm] ... just enrolled` log from your event handler fire.
+
+## 5. Send a command
+
+Commands are queued to the database and delivered over push the next time the device is reachable. The managers expose one-shot helpers for the common types:
+
+```typescript
+// Tell the device to sync immediately (no payload)
+await mdm.devices.sync(deviceId);
+
+// Lock the screen with an optional message
+await mdm.devices.lock(deviceId, 'Return this device to IT');
+
+// Factory reset, optionally preserving SD card data
+await mdm.devices.wipe(deviceId, true);
+
+// Reboot
+await mdm.devices.reboot(deviceId);
+```
+
+Need a type that doesn't have a shortcut? Use `sendCommand`:
+
+```typescript
+await mdm.devices.sendCommand(deviceId, {
+  type: 'installApp',
+  payload: {
+    packageName: 'com.example.app',
+    downloadUrl: 'https://cdn.example.com/app.apk',
+  },
+});
+```
+
+The full set of command types is in [Commands vs Policies](/docs/concepts/commands-and-policies).
+
+## 6. Query the fleet
+
+```typescript
+// All enrolled devices, newest first
+const { devices, total } = await mdm.devices.list({
+  status: 'enrolled',
+  limit: 50,
+});
+console.log(`${total} devices enrolled`);
+
+// One device
+const device = await mdm.devices.get(deviceId);
+console.log('Last seen:', device?.lastHeartbeat);
+console.log('Battery:', device?.batteryLevel);
+console.log('Policy:', device?.policyId);
+```
+
+Or use the CLI for the same thing from a shell:
+
+```bash
+npx openmdm device list
+npx openmdm device show <deviceId>
+npx openmdm stats
+```
+
+See [CLI](/docs/reference/cli) for the full command list.
+
+## You're done
+
+What you just built:
+
+- A Hono server with OpenMDM mounted at `/mdm`.
+- A default kiosk policy seeded in the database.
+- A test device enrolled with a signed payload.
+- An event handler that logs enrollments and heartbeats.
+- A command queued for the device.
+
+What you still need for production:
+
+- A real Android agent built from [`openmdm-android`](https://github.com/openmdm/openmdm-android) with your `DEVICE_SECRET` compiled in.
+- A Firebase project with FCM credentials, or an MQTT broker.
+- Webhook receivers for anything your business cares about. See [Webhooks Recipe](/docs/recipes/webhooks).
+- A proper authorization layer on the admin-side endpoints. OpenMDM authenticates *devices* for you; authenticating *admins* is your job.
+
+## Where to go next
+
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the distinction that will save you from writing `sendCommand` calls inside policy logic.
+- **[Architecture](/docs/concepts/architecture)** — the data flow for enrollment, heartbeats, and command delivery. Read before optimizing anything.
+- **[Webhooks Recipe](/docs/recipes/webhooks)** — receive HMAC-signed events in an external system with a copy-pastable verifier.
+- **[Kiosk Recipe](/docs/recipes/kiosk)** — enable kiosk mode correctly, including how to let an admin unlock a stuck device.

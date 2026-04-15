@@ -1,0 +1,167 @@
+---
+title: Commands vs Policies
+description: The single most confusing distinction in OpenMDM. Read this before writing anything.
+---
+
+# Commands vs Policies
+
+New users spend an afternoon trying to figure out whether "lock the screen" should be a command or a policy setting. Both sound plausible. Only one is right.
+
+This page is the rule.
+
+## The one-line rule
+
+- **Policies are declarative state.** They describe what the device *should look like* from now until the policy changes. They converge.
+- **Commands are imperative actions.** They tell the device to *do one thing once*. They fire and forget.
+
+If it makes sense to say "this device is in state X until we say otherwise," it's a policy. If it makes sense to say "do X right now and tell me when it's done," it's a command.
+
+## The test
+
+Ask: *"If a brand new device enrolls tomorrow, should this thing happen automatically?"*
+
+- **Yes** → it's policy. Put it in `PolicySettings` and assign the policy to a device, group, or default.
+- **No** → it's a command. Call `mdm.devices.sendCommand(id, …)` at the moment it needs to happen.
+
+Concrete examples:
+
+| Intent | Policy or Command? | Why |
+|---|---|---|
+| "Lock devices to the retail POS app" | **Policy** (`kioskMode: true`, `mainApp: 'com.example.pos'`) | Every new device in this fleet should start in kiosk mode automatically. |
+| "Immediately lock this specific stolen device" | **Command** (`mdm.devices.lock(id, 'stolen')`) | A one-off action on one device. |
+| "Require a 6-digit password" | **Policy** (`passwordPolicy: { minLength: 6 }`) | A durable rule every device inherits. |
+| "Force this device to sync right now" | **Command** (`mdm.devices.sync(id)`) | Forcing an immediate action, not changing the rule. |
+| "Install our company app on every device" | **Policy** — specifically, app deployment rules assigned at policy level | Desired state: every device has app X. |
+| "Push this hotfix APK to one test device" | **Command** (`installApp` with `downloadUrl`) | A one-shot deployment for testing. |
+| "Factory reset this device" | **Command** (`mdm.devices.wipe(id)`) | A destructive one-off action. Never a policy. |
+
+If you find yourself writing a cron job that sends the same command to every device every hour, stop. That's a policy with the wrong shape.
+
+## How policies actually reach devices
+
+Policies are durable rows in `mdm_policies`. You assign them with:
+
+```typescript
+// One specific device
+await mdm.devices.assignPolicy(deviceId, policy.id);
+
+// Unassign
+await mdm.devices.assignPolicy(deviceId, null);
+
+// As the fleet default — any new enrollment without an explicit policy
+// inherits this one
+await mdm.policies.create({
+  name: 'Default',
+  isDefault: true,
+  settings: { ... },
+});
+```
+
+A device finds out about its new policy **on its next heartbeat**. The heartbeat response includes a `policyUpdate` field whenever the device's current policy version differs from the cached version on the device side. There is no separate "apply policy" call.
+
+This is why a freshly assigned policy has a small delay (up to one heartbeat interval) before it takes effect. The SDK can optionally send a push wake-up to shorten that window, but the data path is still heartbeat → diff → apply.
+
+## How commands actually reach devices
+
+Commands are rows in `mdm_commands` with a state machine:
+
+```
+pending  ──►  sent  ──►  acknowledged  ──►  completed
+                                      │
+                                      └──►  failed
+```
+
+- **`pending`** — you just called `sendCommand`. DB row exists, push has not fired.
+- **`sent`** — OpenMDM fired a push wake-up via your `PushAdapter`. The device may or may not have received it yet.
+- **`acknowledged`** — the device called `/agent/commands/:id/ack` confirming it has the command and is about to run it.
+- **`completed`** — the device called `/agent/commands/:id/complete` with a result.
+- **`failed`** — the device called `/agent/commands/:id/fail` with an error, or the command timed out.
+
+You can watch this state machine from the event bus:
+
+```typescript
+mdm.on('command.acknowledged', async ({ payload }) => {
+  console.log(`${payload.commandId} is being executed on ${payload.deviceId}`);
+});
+
+mdm.on('command.completed', async ({ payload }) => {
+  console.log(`${payload.commandId} finished:`, payload.result);
+});
+
+mdm.on('command.failed', async ({ payload }) => {
+  console.error(`${payload.commandId} failed:`, payload.error);
+});
+```
+
+## The command vocabulary
+
+OpenMDM defines roughly 30 command types. The common ones have convenience helpers on `mdm.devices`:
+
+```typescript
+await mdm.devices.sync(deviceId);      // force a heartbeat now
+await mdm.devices.reboot(deviceId);
+await mdm.devices.lock(deviceId, message?);
+await mdm.devices.wipe(deviceId, preserveData?);
+```
+
+Everything else goes through `sendCommand`:
+
+```typescript
+await mdm.devices.sendCommand(deviceId, {
+  type: 'installApp',
+  payload: {
+    packageName: 'com.example.app',
+    downloadUrl: 'https://cdn.example.com/app.apk',
+  },
+});
+```
+
+The supported types, from the TypeScript union in `@openmdm/core`:
+
+```text
+reboot, shutdown, sync, lock, unlock, wipe, factoryReset,
+installApp, uninstallApp, updateApp, runApp, clearAppData, clearAppCache,
+shell, setPolicy, grantPermissions, exitKiosk, enterKiosk,
+setWifi, screenshot, getLocation, setVolume, sendNotification,
+whitelistBattery, enablePermissiveMode, setTimeZone, enableAdb,
+rollbackApp, updateAgent, custom
+```
+
+`custom` is the escape hatch — it ships an arbitrary JSON payload the agent handles via a plugin. If you find yourself wishing you could add new built-in types without a library PR, that's what `custom` is for.
+
+## The antipattern: using commands as policy
+
+The most common mistake: a cron job that calls `mdm.devices.sendCommand(id, { type: 'setWifi', ... })` on every device every hour to "ensure the WiFi stays configured."
+
+This is wrong for four reasons:
+
+1. **It wakes devices unnecessarily.** Each command is a push wake-up and a heartbeat round trip. On a 10k-device fleet, hourly commands become millions of push messages per month.
+2. **It races with user action.** If the user tweaks WiFi between commands, the next hourly run overwrites their change — but not consistently.
+3. **It doesn't converge.** If a command fails, nothing retries. The device drifts out of the intended state until the next cron tick.
+4. **It hides intent.** A new engineer looking at the code has to read the cron job to figure out what the "real" WiFi config is. With a policy, the intent lives in `mdm_policies.settings` where anyone can query it.
+
+The fix is always the same: promote the recurring command to a policy setting, and let the heartbeat loop handle convergence.
+
+## When a one-off is actually declarative: groups
+
+If you have a recurring need that feels like policy but only applies to some devices, the right answer is usually a **group**:
+
+```typescript
+const vipGroup = await mdm.groups.create({
+  name: 'VIP handhelds',
+  policyId: vipPolicy.id,
+});
+
+await mdm.devices.addToGroup(deviceId, vipGroup.id);
+```
+
+Groups let you scope a policy without duplicating settings. A device can belong to multiple groups; the resolution order is documented in [Groups](/docs/reference/groups).
+
+## Summary
+
+- **Policy = desired state**, delivered on heartbeat, converges automatically.
+- **Command = one action**, delivered on push wake-up, state-machine tracked.
+- **If the same command runs on a schedule, it's a policy in disguise.**
+- **If a policy only applies to *some* devices, use a group.**
+
+That's the whole mental model. Everything else is details.

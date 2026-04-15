@@ -1,0 +1,186 @@
+---
+title: Kiosk Recipe
+description: Lock devices to a single app, handle exit attempts, and unlock stuck devices.
+---
+
+# Kiosk Recipe
+
+Kiosk mode is the most common reason teams adopt MDM. You have a fleet of devices running exactly one app — a POS terminal, a check-in kiosk, a digital sign — and you need the device to boot into that app, stay in it, and refuse to do anything else.
+
+This recipe covers the full lifecycle: enabling kiosk via policy, handling exit attempts, and unlocking a stuck device when a lockout triggers.
+
+## Enable the plugin
+
+Kiosk is shipped as an optional plugin. Add it to your `createMDM` config:
+
+```typescript title="src/mdm.ts"
+import { createMDM } from '@openmdm/core';
+import { kioskPlugin } from '@openmdm/plugin-kiosk';
+
+export const mdm = createMDM({
+  database: drizzleAdapter(db),
+  push: fcmPushAdapter({ ... }),
+  enrollment: { deviceSecret: process.env.DEVICE_SECRET! },
+  auth: { deviceTokenSecret: process.env.JWT_SECRET! },
+
+  plugins: [
+    kioskPlugin({
+      // Fallback exit password if the policy doesn't set one.
+      defaultExitPassword: process.env.KIOSK_EXIT_PASSWORD!,
+
+      // Let an admin exit kiosk mode via a command from the server,
+      // not just via the on-device password.
+      allowRemoteExit: true,
+
+      // Restart the kiosk app automatically if it crashes.
+      lockOnCrash: false,
+      autoRestart: true,
+      autoRestartDelay: 2000,
+
+      // After 5 wrong exit passwords, lock the device for 15 minutes.
+      // This is the UX that prevents someone from brute-forcing at the
+      // kiosk screen while you're not looking.
+      maxExitAttempts: 5,
+      lockoutDuration: 15,
+    }),
+  ],
+});
+```
+
+Plugins register routes, hooks, and state tracking at instance creation. Once the plugin is loaded, it wires itself into the policy application flow automatically — you don't need to import anything else to use it.
+
+## Create a kiosk policy
+
+Kiosk settings live on the policy, not on the plugin options. The plugin is the *engine*; the policy is the *configuration*:
+
+```typescript
+const kioskPolicy = await mdm.policies.create({
+  name: 'Retail POS Kiosk',
+  description: 'Locks devices to the POS app with status bar hidden',
+  isDefault: true,
+  settings: {
+    kioskMode: true,
+    mainApp: 'com.example.pos',
+    lockStatusBar: true,
+    lockNavigationBar: true,
+    disableHomeButton: true,
+    disableRecentApps: true,
+  },
+});
+```
+
+Fields available in `PolicySettings` for kiosk behavior:
+
+| Field | Type | Effect |
+|---|---|---|
+| `kioskMode` | `boolean` | Master switch. Plugin is a no-op unless this is `true`. |
+| `mainApp` | `string` | Package name of the app the device is locked to. Required when `kioskMode: true`. |
+| `allowedApps` | `string[]` | For multi-app kiosk scenarios. Users can only launch apps in this list. |
+| `lockStatusBar` | `boolean` | Hide the status bar entirely. |
+| `lockNavigationBar` | `boolean` | Hide the nav bar (back/home/recents). |
+| `disableHomeButton` | `boolean` | Intercept the home button. |
+| `disableRecentApps` | `boolean` | Intercept the recent-apps button. |
+| `disablePowerButton` | `boolean` | Soft-disable the power button (the hardware button still works, but short-presses are eaten). |
+| `disableVolumeButtons` | `boolean` | Silence the volume rockers. |
+| `kioskExitPassword` | `string` | Per-policy override of the plugin's `defaultExitPassword`. |
+
+All of these are honored by the Android agent through the Device Policy Manager API. The server-side SDK just ensures the settings are delivered correctly — the enforcement happens on the device.
+
+## Assign the policy
+
+```typescript
+// A specific device
+await mdm.devices.assignPolicy(deviceId, kioskPolicy.id);
+
+// Or as the default — every new device that enrolls without an
+// explicit assignment inherits this policy
+await mdm.policies.setDefault(kioskPolicy.id);
+```
+
+Devices pick up the new policy on their next heartbeat. Expect a 0–60s delay depending on your heartbeat interval.
+
+## Handle exit attempts
+
+When a user tries to exit kiosk mode (by entering a password or triggering a gesture), the device calls one of the plugin's routes. The plugin emits events you can subscribe to:
+
+```typescript
+mdm.on('security.tamper', async (event) => {
+  if (event.payload.type === 'kiosk.exit-attempt') {
+    const { deviceId, attempts, lockedOut } = event.payload;
+    console.warn(
+      `[kiosk] exit attempt ${attempts} on ${deviceId}${lockedOut ? ' (LOCKED OUT)' : ''}`,
+    );
+
+    if (lockedOut) {
+      await alertOps({
+        channel: 'security',
+        text: `Device ${deviceId} is locked out for 15 minutes after ${attempts} failed kiosk exit attempts`,
+      });
+    }
+  }
+});
+```
+
+Exit-attempt state is tracked per-device by the plugin. The counter resets on a successful exit (correct password) or when the lockout timer expires.
+
+## Unlock a stuck device
+
+Two failure modes you need to be able to recover from:
+
+### Failure mode 1: lockout timer still running
+
+When a device is locked out, it will refuse further exit attempts until the timer expires. If you need to unlock it earlier (e.g. an admin is on site and needs access), send a remote exit command:
+
+```typescript
+await mdm.devices.sendCommand(deviceId, {
+  type: 'exitKiosk',
+  payload: {
+    // The server-side override password you set via defaultExitPassword
+    // or kioskExitPassword on the policy.
+    password: process.env.KIOSK_EXIT_PASSWORD!,
+  },
+});
+```
+
+The device executes the command on its next heartbeat (or sooner if the push wakes it up). The command also clears the lockout state and resets the exit-attempt counter.
+
+> `allowRemoteExit: true` must be set on the plugin for this to work. It's a deliberate footgun — if you don't trust your own admin-side auth, you don't want to expose a remote exit path.
+
+### Failure mode 2: wrong `mainApp` package
+
+If you ship a policy with a typo in `mainApp`, the device will lock itself to an app that doesn't exist and become unrecoverable from the UI. To fix this **remotely**, push an updated policy that points to a valid app, then trigger an immediate sync:
+
+```typescript
+await mdm.policies.update(policy.id, {
+  settings: { ...currentSettings, mainApp: 'com.example.correct' },
+});
+
+await mdm.devices.sync(deviceId); // force a heartbeat now
+```
+
+If the device has completely lost connectivity and can't heartbeat, there is no remote recovery and you need physical access. The safest prevention is to always test new kiosk policies on **one** device before promoting them to the fleet default. The CLI makes this easy:
+
+```bash
+npx openmdm policy create --file test-kiosk.json
+npx openmdm policy apply <policyId> <one-test-device-id>
+# verify manually, then
+npx openmdm policy apply <policyId> <every-other-device>
+```
+
+## Testing your kiosk policy
+
+Because kiosk mistakes can brick real hardware, you want a testing loop tight enough to iterate in minutes:
+
+1. **Run the dev enrollment harness** ([Quick Start §4](/docs/quick-start)) against a test device or emulator.
+2. **Assign the kiosk policy** to just that device.
+3. **Observe in the `device.heartbeat` event handler** that the device reports the policy as applied.
+4. **Try to exit** — first with the wrong password, then the right one. Watch for the `security.tamper` event.
+5. **Hit the lockout limit** to verify the counter and timer work.
+6. **Use the CLI** (`openmdm device show <id>`) to confirm policy state from outside your app.
+
+Once you're confident, promote the policy to default or assign it to a group.
+
+## Where to go next
+
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — why kiosk config lives on the policy, not the plugin options.
+- **[Webhooks Recipe](/docs/recipes/webhooks)** — wire the `security.tamper` events to Slack or PagerDuty for live fleet alerts.

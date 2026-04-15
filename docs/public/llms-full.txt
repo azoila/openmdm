@@ -1,0 +1,1543 @@
+# OpenMDM — Full Documentation
+
+> This file is the complete OpenMDM documentation concatenated as markdown.
+> It is generated from the MDX sources at docs/content/docs. Paste it into
+> an LLM context window to ask questions without fetching pages individually.
+
+> Generated: 2026-04-15T12:43:11.763Z
+
+---
+
+## Agent Wire Protocol
+
+*URL: https://openmdm.dev/docs/concepts/agent-protocol*
+
+*Why /agent/* responses use an envelope, and how v1 and v2 clients coexist during rollout.*
+
+# Agent Wire Protocol
+
+The `/agent/*` endpoints — everything an enrolled device calls — use a different response shape than the admin endpoints. This page explains why, and what you need to know if you're building a custom agent or debugging a fleet bug.
+
+## The bug this protocol fixes
+
+In OpenMDM's first iteration, agent endpoints returned either a bare JSON body on success or raised an `HTTPException(401|404|5xx)` on failure. The agent then had to decide what to do based on the HTTP status code.
+
+The agent's logic looked, roughly, like this:
+
+```kotlin
+when (response.code) {
+    200 -> ok(response.body)
+    401 -> reEnroll()       // "my token is bad → wipe local state"
+    404 -> reEnroll()       // "server lost me → wipe local state"
+    else -> retry()
+}
+```
+
+That worked for the happy path. In production it broke, in the exact way you'd expect: a **transient** 401 from a Lambda cold start or a **transient** 404 from an eventual-consistency window was indistinguishable from a **real** "your enrollment is gone" response. The agent would wipe its local state and try to re-enroll — and since its enrollment secret was still valid, it would succeed, with a fresh `deviceId` and empty history.
+
+The result was a fleet of devices that looked fine on metrics but had lost their IDs, policies, and command history every time a backend blip happened. We called it the auto-unenroll bug, and it was the one production incident that led directly to this whole protocol redesign.
+
+## The fix: one decision field per response
+
+Under protocol v2, every agent endpoint replies with HTTP 200 and a body of shape `AgentResponse`:
+
+```typescript
+type AgentAction = 'none' | 'retry' | 'reauth' | 'unenroll';
+
+type AgentResponse<T = unknown> =
+  | { ok: true;  action: 'none';                         data: T }
+  | { ok: false; action: 'retry' | 'reauth' | 'unenroll'; message?: string };
+```
+
+The agent only reads `action`. There is **exactly one handler per action** on the device side:
+
+- **`none`** → happy path. Consume `data` and continue.
+- **`retry`** → transient problem. Back off and retry later. **Do not touch local state.**
+- **`reauth`** → access token is no longer valid. Run the refresh flow. **Do not wipe enrollment.**
+- **`unenroll`** → server-side record for this device is gone or blocked, and the credentials will never work again. Stop making requests. In Phase 2b this will be softened: the agent will attempt a hardware-identity-based rebind before treating this as terminal.
+
+The critical property: **a bad token produces `reauth`, never `unenroll`**. Test coverage in `packages/adapters/hono/tests/device-auth.test.ts` locks this invariant in, because it's the exact thing that caused the original incident.
+
+## The header: opt-in, not opt-out
+
+Agents indicate they want v2 responses by sending:
+
+```http
+X-Openmdm-Protocol: 2
+```
+
+on every request. When the header is absent or anything other than the literal string `"2"`, the server falls back to v1 behavior: bare JSON on success, `HTTPException` on failure. This is **deliberate**. During a fleet rollout you have:
+
+- New agents that speak v2 and send the header.
+- Old agents that don't know about the header.
+- A server that has to talk to both.
+
+Without the opt-in, you'd need to cut over the entire fleet in one deploy. With the opt-in, you ship the new server first (which can talk both), then update agents at your own pace. When the last v1 device is retired, you remove the fallback branch in a future major version.
+
+> Header parsing is **strict equality with the string `"2"`**. `" 2"`, `"2.0"`, `"true"`, `"v2"`, `3` — all fall back to v1. This is the kind of thing where fuzzy matching would create subtle rollout bugs, so we don't do it.
+
+## The v1 → v2 status mapping
+
+Because v1 agents expect HTTP status codes, the server needs to pick one when replying to v1 in a failure case. The mapping is:
+
+| v2 `action` | v1 HTTP status | Meaning |
+|---|---|---|
+| `reauth` | `401 Unauthorized` | The device's access token was rejected. |
+| `unenroll` | `404 Not Found` | The server has no record of this device id. |
+| `retry` | `503 Service Unavailable` | Transient server-side issue. |
+
+A v1 agent seeing these statuses behaves exactly as it did before the envelope existed — which is important, because that's the behavior its code was written against.
+
+## Using the helpers in custom endpoints
+
+If you're adding your own route under `/agent/*`, use the helpers from `@openmdm/hono` so your code participates in the v1/v2 branching without thinking about it:
+
+```typescript
+import { Hono } from 'hono';
+import {
+  agentOkResponse,
+  agentReauth,
+  agentUnenroll,
+  agentRetry,
+} from '@openmdm/hono';
+
+const agent = new Hono();
+
+agent.get('/things', async (c) => {
+  const device = await mdm.devices.get(c.get('deviceId'));
+  if (!device) return agentUnenroll(c, 'Device not found');
+
+  const things = await mdm.things.listFor(device);
+  return agentOkResponse(c, { things });
+});
+
+agent.post('/things/:id', async (c) => {
+  const device = await mdm.devices.get(c.get('deviceId'));
+  if (!device) return agentReauth(c);
+
+  try {
+    await doTheThing(c.req.param('id'));
+    return agentOkResponse(c, { success: true });
+  } catch (err) {
+    return agentRetry(c, 'downstream unavailable');
+  }
+});
+```
+
+The helpers check `X-Openmdm-Protocol` on the current request and either return a 200 envelope or throw an `HTTPException` with the appropriate legacy status. You write the handler once, and both v1 and v2 clients get served correctly.
+
+## What is still HTTP-level
+
+HTTP `5xx` is still used for **real infrastructure failures** — the Lambda timed out, the database connection dropped, the process crashed before your handler ran. v2 envelopes are reserved for *application-level* failures the agent can reason about. If you see a 500 on an agent endpoint, something is broken at the process or platform level, not at the protocol level.
+
+Rate limiting and payload-size-too-large stay at HTTP level too (`429`, `413`). The agent's HTTP client should handle these the same way it handles any other HTTP error.
+
+## Where to go next
+
+- **[Enrollment](/docs/concepts/enrollment)** — the one endpoint that can't use the envelope because it's pre-auth.
+- **[Architecture](/docs/concepts/architecture)** — where `/agent/*` sits in the overall data flow.
+
+---
+
+## Architecture
+
+*URL: https://openmdm.dev/docs/concepts/architecture*
+
+*How OpenMDM fits into your backend and how data flows between your server and devices.*
+
+# Architecture
+
+OpenMDM is shaped by one hard constraint: **it must run in the same process as your app and read/write the same database**. Every other design choice follows from that.
+
+This page is the map. If you want to understand *why* some API looks the way it does, start here.
+
+## The three boundaries
+
+Every MDM deployment has three components, and OpenMDM gives you exactly one of them:
+
+```
+┌─────────────────────┐      ┌─────────────────────┐      ┌─────────────────────┐
+│                     │      │                     │      │                     │
+│   Your backend      │◄────►│  Push infra         │◄────►│  Android device     │
+│   (Node / Hono)     │ HTTPS│  (FCM or MQTT)      │  FCM │  (openmdm-android)  │
+│                     │      │                     │      │                     │
+│   - Your routes     │      │  You pick one.      │      │  The agent APK you  │
+│   - OpenMDM SDK     │      │  Both are real      │      │  build with your    │
+│   - Your DB         │      │  production paths.  │      │  secrets compiled   │
+│                     │      │                     │      │  in.                │
+└─────────────────────┘      └─────────────────────┘      └─────────────────────┘
+        ▲                                                          ▲
+        │                                                          │
+        │                HTTPS requests from device                │
+        └──────────────────────────────────────────────────────────┘
+```
+
+- **Your backend** is the box OpenMDM lives in. You keep owning your DB, your auth, your observability.
+- **Push** is a separate service you run or rent. OpenMDM abstracts it behind a `PushAdapter` so swapping FCM for MQTT is a one-line config change.
+- **The Android agent** is a separate GitHub repo, [`openmdm-android`](https://github.com/openmdm/openmdm-android). You build it once with your enrollment secret compiled in, then distribute the APK through whatever mechanism you already use (zero-touch, MDM provisioning, sideload, etc.).
+
+OpenMDM does not run a server of its own. There is no `@openmdm/server` package. If you see that in an older doc, it's wrong.
+
+## The SDK shape
+
+A single `createMDM(config)` call returns an `MDMInstance`:
+
+```typescript
+const mdm = createMDM({
+  database: drizzleAdapter(db),   // how to persist
+  push: fcmPushAdapter({ ... }),  // how to wake devices
+  enrollment: { deviceSecret },   // how to validate enrollment
+  auth: { deviceTokenSecret },    // how to sign device JWTs
+  plugins: [kioskPlugin({ ... })],
+  webhooks: { endpoints: [...] },
+});
+```
+
+The instance exposes **managers** (`mdm.devices`, `mdm.policies`, `mdm.commands`, `mdm.apps`, `mdm.groups`), an **event bus** (`mdm.on`, `mdm.emit`), and a few **protocol entrypoints** (`mdm.enroll`, `mdm.processHeartbeat`, `mdm.verifyDeviceToken`). That's it. Everything else is either an adapter or a plugin.
+
+Adapters are the pluggable parts: `DatabaseAdapter`, `PushAdapter`, and the (optional) `StorageAdapter` for APK hosting. If you don't like Drizzle, write your own `DatabaseAdapter` and pass it in. If you want to send push through your own in-house broker, write a `PushAdapter`.
+
+## The three control flows
+
+### 1. Enrollment
+
+Enrollment is the one-time handshake where a device proves it's allowed to join the fleet and receives a long-lived token.
+
+```
+Device                              Your backend
+  │                                      │
+  │  POST /mdm/agent/enroll              │
+  │  { deviceInfo, method,               │
+  │    timestamp, signature }            │
+  ├─────────────────────────────────────►│
+  │                                      │
+  │                                      │  verifyEnrollmentSignature(req)
+  │                                      │  checks HMAC against DEVICE_SECRET
+  │                                      │
+  │                                      │  createDevice(...)
+  │                                      │  issueDeviceToken(...)
+  │                                      │
+  │  201 { deviceId, token }             │
+  │◄─────────────────────────────────────┤
+  │                                      │
+```
+
+The signature is an HMAC-SHA256 over a canonical pipe-delimited message. If the secret matches, the server writes a new row in `mdm_devices`, assigns the default policy (if any), and returns a device-scoped JWT. The agent persists that JWT and uses it on every subsequent request.
+
+`DEVICE_SECRET` lives in two places: your `.env` and the compiled Android APK. Rotating it means rebuilding the agent and redeploying both sides together.
+
+See [Enrollment](/docs/concepts/enrollment) for the canonical form and [Agent Wire Protocol](/docs/concepts/agent-protocol) for what happens when the signature fails.
+
+### 2. Heartbeat loop
+
+After enrollment, the device calls `/mdm/agent/heartbeat` on a schedule (default: every 60s, configurable per policy). Each heartbeat carries telemetry and returns the next batch of commands plus any policy update.
+
+```
+Device                              Your backend
+  │                                      │
+  │  POST /mdm/agent/heartbeat           │
+  │  Bearer <device token>               │
+  │  { battery, storage, apps,           │
+  │    location, security }              │
+  ├─────────────────────────────────────►│
+  │                                      │
+  │                                      │  deviceAuth middleware
+  │                                      │  processHeartbeat(id, body)
+  │                                      │    ├─ updates mdm_devices row
+  │                                      │    ├─ writes mdm_events
+  │                                      │    └─ fires 'device.heartbeat'
+  │                                      │
+  │                                      │  commands.getPending(id)
+  │                                      │  policies.get(device.policyId)
+  │                                      │
+  │  200 {                               │
+  │    pendingCommands: [...],           │
+  │    policyUpdate: { ... } | null      │
+  │  }                                   │
+  │◄─────────────────────────────────────┤
+```
+
+The heartbeat is **the only reliable way policies reach devices**. Push wakes the device up, but the actual policy and command delivery happens on the next heartbeat. This matters when you're debugging why a freshly assigned policy hasn't taken effect — it will, on the next heartbeat.
+
+### 3. Command delivery
+
+When your app calls `mdm.devices.sendCommand()`, three things happen:
+
+```
+Your app                     Server                     Push infra              Device
+  │                              │                          │                      │
+  │ sendCommand(id, {type,…})    │                          │                      │
+  ├─────────────────────────────►│                          │                      │
+  │                              │  INSERT INTO              │                      │
+  │                              │  mdm_commands             │                      │
+  │                              │  (status='pending')       │                      │
+  │                              │                          │                      │
+  │                              │  push.send(id, {         │                      │
+  │                              │    type: 'command.sync'  │                      │
+  │                              │  })                      │                      │
+  │                              ├─────────────────────────►│                      │
+  │                              │                          │   FCM data message   │
+  │                              │                          ├─────────────────────►│
+  │                              │  UPDATE mdm_commands      │                      │
+  │                              │  SET status='sent'        │                      │
+  │  Command { id, status='sent'}│                          │                      │
+  │◄─────────────────────────────┤                          │                      │
+  │                              │                          │                      │
+  │                              │◄─────────────────────────┼──────────────────────┤
+  │                              │       POST /mdm/agent/heartbeat                  │
+  │                              │       (triggered by push)                        │
+  │                              │                                                  │
+  │                              │  response includes                               │
+  │                              │  pendingCommands: [{…}]                          │
+  │                              │                                                  │
+  │                              │◄─────────────────────────┼──────────────────────┤
+  │                              │       POST /mdm/agent/commands/:id/ack           │
+  │                              │                                                  │
+  │                              │  UPDATE mdm_commands SET status='acknowledged'   │
+  │                              │                                                  │
+  │                              │◄─────────────────────────┼──────────────────────┤
+  │                              │       POST /mdm/agent/commands/:id/complete      │
+  │                              │                                                  │
+  │                              │  UPDATE mdm_commands SET status='completed'      │
+```
+
+The command moves through `pending → sent → acknowledged → completed` (or `failed`). The push notification is a wake-up hint, not the command itself; the command body is always pulled by the device on the heartbeat.
+
+This is "MDM is pull *and* push, not just push" — and it's why the SDK has no concept of a persistent open connection from the server to the device. The DB row is the source of truth; push is best-effort delivery of a wake-up.
+
+## Why the heartbeat is pulled, not pushed
+
+If you're coming from a web background, you might expect something like WebSockets. The reason MDM doesn't work that way:
+
+- Android aggressively kills long-lived network connections to save battery. A "persistent" socket lasts minutes, not days.
+- Carrier NAT timeouts are in the same ballpark.
+- Android Enterprise expects agents to be silent most of the time and only work on demand — persistent connections would burn battery and set off battery-optimization heuristics.
+- FCM is already the official "wake up this app in the background" primitive.
+
+Pull-with-push-wakeup is the only pattern that survives contact with real fleets. OpenMDM doesn't try to fight it.
+
+## What you own vs what OpenMDM owns
+
+| Concern | You | OpenMDM |
+|---|---|---|
+| HTTP server, TLS, reverse proxy | ✅ | — |
+| Admin authentication (who can call `mdm.devices.list`) | ✅ | — |
+| Database schema + migrations | ✅ via drizzle-kit | schema definition only |
+| Device enrollment + token issuance | — | ✅ |
+| Heartbeat processing | — | ✅ |
+| Command queue + state machine | — | ✅ |
+| Policy storage + delivery | — | ✅ |
+| Push delivery | — | ✅ via adapter |
+| Webhook signing + retry | — | ✅ |
+| Business logic that reacts to device events | ✅ via event handlers | — |
+| APK hosting | ✅ or S3 adapter | adapter only |
+
+The short version: OpenMDM owns the MDM protocol. You own everything that makes your app *your app*.
+
+## Where to go next
+
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the distinction that's nonobvious from the API.
+- **[Enrollment](/docs/concepts/enrollment)** — the canonical signing form and why there are two secrets.
+- **[Agent Wire Protocol](/docs/concepts/agent-protocol)** — the v1/v2 envelope and why it exists.
+
+---
+
+## Commands vs Policies
+
+*URL: https://openmdm.dev/docs/concepts/commands-and-policies*
+
+*The single most confusing distinction in OpenMDM. Read this before writing anything.*
+
+# Commands vs Policies
+
+New users spend an afternoon trying to figure out whether "lock the screen" should be a command or a policy setting. Both sound plausible. Only one is right.
+
+This page is the rule.
+
+## The one-line rule
+
+- **Policies are declarative state.** They describe what the device *should look like* from now until the policy changes. They converge.
+- **Commands are imperative actions.** They tell the device to *do one thing once*. They fire and forget.
+
+If it makes sense to say "this device is in state X until we say otherwise," it's a policy. If it makes sense to say "do X right now and tell me when it's done," it's a command.
+
+## The test
+
+Ask: *"If a brand new device enrolls tomorrow, should this thing happen automatically?"*
+
+- **Yes** → it's policy. Put it in `PolicySettings` and assign the policy to a device, group, or default.
+- **No** → it's a command. Call `mdm.devices.sendCommand(id, …)` at the moment it needs to happen.
+
+Concrete examples:
+
+| Intent | Policy or Command? | Why |
+|---|---|---|
+| "Lock devices to the retail POS app" | **Policy** (`kioskMode: true`, `mainApp: 'com.example.pos'`) | Every new device in this fleet should start in kiosk mode automatically. |
+| "Immediately lock this specific stolen device" | **Command** (`mdm.devices.lock(id, 'stolen')`) | A one-off action on one device. |
+| "Require a 6-digit password" | **Policy** (`passwordPolicy: { minLength: 6 }`) | A durable rule every device inherits. |
+| "Force this device to sync right now" | **Command** (`mdm.devices.sync(id)`) | Forcing an immediate action, not changing the rule. |
+| "Install our company app on every device" | **Policy** — specifically, app deployment rules assigned at policy level | Desired state: every device has app X. |
+| "Push this hotfix APK to one test device" | **Command** (`installApp` with `downloadUrl`) | A one-shot deployment for testing. |
+| "Factory reset this device" | **Command** (`mdm.devices.wipe(id)`) | A destructive one-off action. Never a policy. |
+
+If you find yourself writing a cron job that sends the same command to every device every hour, stop. That's a policy with the wrong shape.
+
+## How policies actually reach devices
+
+Policies are durable rows in `mdm_policies`. You assign them with:
+
+```typescript
+// One specific device
+await mdm.devices.assignPolicy(deviceId, policy.id);
+
+// Unassign
+await mdm.devices.assignPolicy(deviceId, null);
+
+// As the fleet default — any new enrollment without an explicit policy
+// inherits this one
+await mdm.policies.create({
+  name: 'Default',
+  isDefault: true,
+  settings: { ... },
+});
+```
+
+A device finds out about its new policy **on its next heartbeat**. The heartbeat response includes a `policyUpdate` field whenever the device's current policy version differs from the cached version on the device side. There is no separate "apply policy" call.
+
+This is why a freshly assigned policy has a small delay (up to one heartbeat interval) before it takes effect. The SDK can optionally send a push wake-up to shorten that window, but the data path is still heartbeat → diff → apply.
+
+## How commands actually reach devices
+
+Commands are rows in `mdm_commands` with a state machine:
+
+```
+pending  ──►  sent  ──►  acknowledged  ──►  completed
+                                      │
+                                      └──►  failed
+```
+
+- **`pending`** — you just called `sendCommand`. DB row exists, push has not fired.
+- **`sent`** — OpenMDM fired a push wake-up via your `PushAdapter`. The device may or may not have received it yet.
+- **`acknowledged`** — the device called `/agent/commands/:id/ack` confirming it has the command and is about to run it.
+- **`completed`** — the device called `/agent/commands/:id/complete` with a result.
+- **`failed`** — the device called `/agent/commands/:id/fail` with an error, or the command timed out.
+
+You can watch this state machine from the event bus:
+
+```typescript
+mdm.on('command.acknowledged', async ({ payload }) => {
+  console.log(`${payload.commandId} is being executed on ${payload.deviceId}`);
+});
+
+mdm.on('command.completed', async ({ payload }) => {
+  console.log(`${payload.commandId} finished:`, payload.result);
+});
+
+mdm.on('command.failed', async ({ payload }) => {
+  console.error(`${payload.commandId} failed:`, payload.error);
+});
+```
+
+## The command vocabulary
+
+OpenMDM defines roughly 30 command types. The common ones have convenience helpers on `mdm.devices`:
+
+```typescript
+await mdm.devices.sync(deviceId);      // force a heartbeat now
+await mdm.devices.reboot(deviceId);
+await mdm.devices.lock(deviceId, message?);
+await mdm.devices.wipe(deviceId, preserveData?);
+```
+
+Everything else goes through `sendCommand`:
+
+```typescript
+await mdm.devices.sendCommand(deviceId, {
+  type: 'installApp',
+  payload: {
+    packageName: 'com.example.app',
+    downloadUrl: 'https://cdn.example.com/app.apk',
+  },
+});
+```
+
+The supported types, from the TypeScript union in `@openmdm/core`:
+
+```text
+reboot, shutdown, sync, lock, unlock, wipe, factoryReset,
+installApp, uninstallApp, updateApp, runApp, clearAppData, clearAppCache,
+shell, setPolicy, grantPermissions, exitKiosk, enterKiosk,
+setWifi, screenshot, getLocation, setVolume, sendNotification,
+whitelistBattery, enablePermissiveMode, setTimeZone, enableAdb,
+rollbackApp, updateAgent, custom
+```
+
+`custom` is the escape hatch — it ships an arbitrary JSON payload the agent handles via a plugin. If you find yourself wishing you could add new built-in types without a library PR, that's what `custom` is for.
+
+## The antipattern: using commands as policy
+
+The most common mistake: a cron job that calls `mdm.devices.sendCommand(id, { type: 'setWifi', ... })` on every device every hour to "ensure the WiFi stays configured."
+
+This is wrong for four reasons:
+
+1. **It wakes devices unnecessarily.** Each command is a push wake-up and a heartbeat round trip. On a 10k-device fleet, hourly commands become millions of push messages per month.
+2. **It races with user action.** If the user tweaks WiFi between commands, the next hourly run overwrites their change — but not consistently.
+3. **It doesn't converge.** If a command fails, nothing retries. The device drifts out of the intended state until the next cron tick.
+4. **It hides intent.** A new engineer looking at the code has to read the cron job to figure out what the "real" WiFi config is. With a policy, the intent lives in `mdm_policies.settings` where anyone can query it.
+
+The fix is always the same: promote the recurring command to a policy setting, and let the heartbeat loop handle convergence.
+
+## When a one-off is actually declarative: groups
+
+If you have a recurring need that feels like policy but only applies to some devices, the right answer is usually a **group**:
+
+```typescript
+const vipGroup = await mdm.groups.create({
+  name: 'VIP handhelds',
+  policyId: vipPolicy.id,
+});
+
+await mdm.devices.addToGroup(deviceId, vipGroup.id);
+```
+
+Groups let you scope a policy without duplicating settings. A device can belong to multiple groups; the resolution order is documented in [Groups](/docs/reference/groups).
+
+## Summary
+
+- **Policy = desired state**, delivered on heartbeat, converges automatically.
+- **Command = one action**, delivered on push wake-up, state-machine tracked.
+- **If the same command runs on a schedule, it's a policy in disguise.**
+- **If a policy only applies to *some* devices, use a group.**
+
+That's the whole mental model. Everything else is details.
+
+---
+
+## Enrollment
+
+*URL: https://openmdm.dev/docs/concepts/enrollment*
+
+*How a device proves it's allowed to join the fleet and how OpenMDM validates it.*
+
+# Enrollment
+
+Enrollment is the one moment in a device's life where it has no server identity yet. Everything that makes the post-enrollment world secure — device-scoped tokens, heartbeats, command authorization — is bootstrapped from this single HTTP request.
+
+That's why enrollment has its own dedicated cryptographic boundary: a pre-shared HMAC secret baked into the Android agent at build time. This page documents exactly how that boundary works so you can reason about it and audit it.
+
+## The shape of an enrollment request
+
+A device enrolls by POSTing to `/mdm/agent/enroll` with an `EnrollmentRequest`:
+
+```typescript
+interface EnrollmentRequest {
+  // Device identifiers (at least one required)
+  macAddress?: string;
+  serialNumber?: string;
+  imei?: string;
+  androidId?: string;
+
+  // Device info
+  model: string;
+  manufacturer: string;
+  osVersion: string;
+  sdkVersion?: number;
+
+  // Enrollment metadata
+  method: 'qr' | 'nfc' | 'zero-touch' | 'knox' | 'manual' | 'app-only' | 'adb';
+  timestamp: string;    // ISO 8601
+  signature: string;    // HMAC-SHA256 hex
+
+  // Optional pre-assignment
+  policyId?: string;
+  groupId?: string;
+}
+```
+
+If `enrollment.deviceSecret` is configured on the server (it always should be in production), every request is HMAC-verified before a row hits the database.
+
+## The canonical signing form
+
+The HMAC input is **nine fields joined with a pipe character**:
+
+```text
+model | manufacturer | osVersion | serialNumber | imei | macAddress | androidId | method | timestamp
+```
+
+Empty optional fields are represented as empty strings, not omitted. The separator is a single `|` with no surrounding whitespace. The signature is computed as:
+
+```text
+HMAC_SHA256(deviceSecret, message).hex()
+```
+
+This canonical form is **load-bearing**. Changing any of these in either `@openmdm/client` or `@openmdm/core` is a wire break that silently prevents every device from enrolling. The enrollment-signature contract test in `packages/core/tests/enrollment-signature.test.ts` exists to catch any drift — if you see it fail in CI, do not "fix" it by updating one side. Understand why both sides must agree and update both in a single coordinated release.
+
+### In @openmdm/client
+
+The device-side SDK exports a helper:
+
+```typescript
+import { generateEnrollmentSignature } from '@openmdm/client';
+
+const signature = await generateEnrollmentSignature(request, timestamp, deviceSecret);
+```
+
+### In @openmdm/core
+
+The server-side verification function is also exported so you can use it in custom enrollment flows that bypass the default `/mdm/agent/enroll` route:
+
+```typescript
+import { verifyEnrollmentSignature } from '@openmdm/core';
+
+if (!verifyEnrollmentSignature(request, deviceSecret)) {
+  throw new Error('Invalid signature');
+}
+```
+
+## Why HMAC and not a certificate
+
+For Phase 2a (what ships today), HMAC is the right tradeoff:
+
+- **Pro:** No PKI to operate. The secret is a single value you generate with `openssl rand -hex 32` and bake into one file on each side.
+- **Pro:** Signature verification is a constant-time operation that works offline.
+- **Con:** The secret is symmetric. Anyone who extracts it from an APK and captures the device metadata can forge an enrollment request.
+- **Con:** Rotation requires redeploying both sides together.
+
+Phase 2b (roadmap) introduces **hardware-rooted identity** using Android's Keystore attestation. The device generates a keypair in the TEE, submits an attested enrollment request signed with the private key, and the server verifies the attestation chain against Google's roots. At that point, the pre-shared HMAC becomes redundant and will be deprecated.
+
+Until then, **treat the HMAC secret as production-critical**. Store it in your secret manager, not in a git repo, and rotate it if you have reason to believe an APK was extracted.
+
+## The two secrets
+
+New users sometimes assume `enrollment.deviceSecret` and `auth.deviceTokenSecret` are the same thing. They are not, and mixing them up is a security hole.
+
+- **`deviceSecret`** — HMAC secret for enrollment requests. Lives in the APK and the server. Proves "this request is from a device built with our agent."
+- **`deviceTokenSecret`** — JWT signing secret for device tokens returned *after* enrollment. Lives only on the server. Proves "this device token was issued by our server."
+
+They serve different purposes:
+
+```
+Before enrollment:                       After enrollment:
+┌──────────────┐                        ┌──────────────┐
+│ EnrollmentRequest │                    │ Bearer token │
+│ + HMAC(DEVICE_SECRET)│                 │ signed with JWT_SECRET│
+└──────────────┘                        └──────────────┘
+         │                                       │
+         ▼                                       ▼
+   verifyEnrollmentSignature              verifyDeviceToken
+```
+
+Rotating `deviceTokenSecret` logs out every device (they get a 401 and refresh their token through re-enrollment or a refresh flow in Phase 2c). Rotating `deviceSecret` requires a new APK build — because the old APK can no longer produce valid enrollment signatures.
+
+## What the server does on a valid enrollment
+
+1. Parse and validate the request body (`EnrollmentRequest`).
+2. Run `verifyEnrollmentSignature(request, deviceSecret)`. Reject on false.
+3. Run any `enrollment.validate(request)` custom validator you passed in the config. Reject on false.
+4. Compute a deterministic `enrollmentId` from the first available identifier: `macAddress → serialNumber → imei → androidId`.
+5. Upsert the row in `mdm_devices` with status `enrolled`.
+6. Assign the default policy if one exists and no explicit `policyId` was provided.
+7. Fire the `device.enrolled` event (your handlers run now).
+8. Issue a device JWT signed with `deviceTokenSecret` and return `{ deviceId, token, serverUrl, config }`.
+
+From the agent's perspective, it goes from "I have a pre-shared secret and some device metadata" to "I have a long-lived bearer token" in a single round trip.
+
+## The dev harness
+
+During local development, you usually don't have a real Android agent handy. The dev harness is a script that signs an `EnrollmentRequest` with your local `DEVICE_SECRET` and calls `mdm.enroll()` directly, bypassing the HTTP layer. See [Quick Start §4](/docs/quick-start) for the full example.
+
+## What can go wrong
+
+- **Invalid signature.** The canonical forms diverged between `@openmdm/client` and `@openmdm/core`, or the secret differs between APK and server. The enrollment-signature contract test will catch the code divergence; the secret mismatch you diagnose by inspecting both environments.
+- **Timestamp drift.** The current implementation does *not* reject stale timestamps (this is [a known gap](#) tracked for Phase 2b). An attacker who captures a valid enrollment request can replay it — though the replay gives them nothing new because the server upserts by `enrollmentId`.
+- **Missing identifier.** If all four of `macAddress`/`serialNumber`/`imei`/`androidId` are empty, the server has nothing to key on and rejects the request.
+- **Pre-assigned `policyId`/`groupId` referring to nothing.** The enrollment completes but without the assignment; check the `device.enrolled` event handler to surface this.
+
+## Where to go next
+
+- **[Agent Wire Protocol](/docs/concepts/agent-protocol)** — what a failed enrollment looks like on the wire and how v1/v2 clients handle it.
+- **[Architecture](/docs/concepts/architecture)** — the full data flow including the heartbeat loop that follows enrollment.
+
+---
+
+## Installation
+
+*URL: https://openmdm.dev/docs/installation*
+
+*Install OpenMDM, set up your database schema, and create your first MDMInstance.*
+
+# Installation
+
+This page gets you from zero to a working `MDMInstance` you can call methods on. The next page ([Quick Start](/docs/quick-start)) wires it into a running HTTP server.
+
+## Prerequisites
+
+- **Node.js 20+** (or Bun 1.1+, or Deno 1.40+).
+- **A database** supported by Drizzle ORM — Postgres, MySQL, or SQLite. All examples here use Postgres.
+- **A push provider.** For public fleets with Google Play Services, use **FCM** (a Firebase project and a service-account JSON). For private networks or GMS-less devices, use **MQTT** with your own broker.
+
+OpenMDM does **not** need a Firebase or FCM setup during development if you use MQTT or skip push entirely — but a push provider is mandatory for any real fleet, because commands are delivered via push wake-up.
+
+## Install the packages
+
+The minimum set:
+
+```bash
+pnpm add @openmdm/core @openmdm/drizzle-adapter @openmdm/hono @openmdm/push-fcm
+pnpm add drizzle-orm postgres hono
+```
+
+`drizzle-orm` and `postgres` are peer-like deps that live in your app, not ours. `hono` is the HTTP framework — if you're already on Hono, you already have it.
+
+If you're using MQTT instead of FCM:
+
+```bash
+pnpm add @openmdm/push-mqtt
+```
+
+If you want APK hosting via presigned URLs:
+
+```bash
+pnpm add @openmdm/storage-s3
+```
+
+## Generate the database schema
+
+OpenMDM ships its schema as a Drizzle-compatible definition you can generate into your project. The CLI writes it to a file you manage with `drizzle-kit`:
+
+```bash
+npx openmdm generate --adapter drizzle --provider pg --output ./src/db/schema.ts
+```
+
+Then run Drizzle's normal migration workflow:
+
+```bash
+npx drizzle-kit generate
+npx drizzle-kit migrate
+```
+
+This creates the `mdm_devices`, `mdm_policies`, `mdm_commands`, `mdm_events`, `mdm_groups`, `mdm_applications`, `mdm_push_tokens`, and `mdm_app_deployments` tables in your existing database, alongside your app's own tables.
+
+> **Why no separate database?** That's the whole point. OpenMDM writes into your Postgres so device state, user state, and business data live in one transactional world.
+
+## Create the MDM instance
+
+Create one file — convention is `src/mdm.ts` — that exports a single configured `MDMInstance`:
+
+```typescript title="src/mdm.ts"
+import { createMDM } from '@openmdm/core';
+import { drizzleAdapter } from '@openmdm/drizzle-adapter';
+import { fcmPushAdapter } from '@openmdm/push-fcm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+
+const client = postgres(process.env.DATABASE_URL!);
+const db = drizzle(client);
+
+export const mdm = createMDM({
+  database: drizzleAdapter(db),
+
+  push: fcmPushAdapter({
+    credentialPath: './firebase-service-account.json',
+    // Data-only messages keep the agent in control of how the
+    // notification is surfaced — important for silent commands.
+    dataOnly: true,
+  }),
+
+  enrollment: {
+    // HMAC secret used to sign enrollment payloads. Must match the
+    // secret compiled into the Android agent build. Rotate by
+    // rebuilding the agent and the server in lockstep.
+    deviceSecret: process.env.DEVICE_SECRET!,
+    autoEnroll: true,
+  },
+
+  auth: {
+    // Secret used to sign device-facing JWTs after enrollment.
+    deviceTokenSecret: process.env.JWT_SECRET!,
+  },
+
+  serverUrl: process.env.SERVER_URL, // e.g. "https://mdm.example.com"
+});
+```
+
+That's the whole SDK boot. `mdm` is an object with `mdm.devices`, `mdm.policies`, `mdm.commands`, `mdm.apps`, `mdm.groups`, `mdm.push`, `mdm.on(...)`, and more. You import it anywhere in your app that needs to talk to devices.
+
+## Environment variables
+
+```bash title=".env"
+# Database
+DATABASE_URL=postgres://user:password@localhost:5432/yourapp
+
+# Enrollment HMAC secret — must match the Android agent's compiled-in secret
+DEVICE_SECRET=<64-char hex; generate with `openssl rand -hex 32`>
+
+# Device token signing secret (separate from DEVICE_SECRET by design)
+JWT_SECRET=<64-char hex; generate with `openssl rand -hex 32`>
+
+# Public base URL of your backend
+SERVER_URL=https://mdm.example.com
+
+# Firebase (if using FCM)
+# OR provide credentialPath to a service-account JSON
+```
+
+> **Two secrets, not one.** `DEVICE_SECRET` signs enrollment payloads (proves a device is allowed to enroll). `JWT_SECRET` signs the device tokens returned after successful enrollment (proves a subsequent request is from an enrolled device). Rotating `JWT_SECRET` invalidates all device sessions but does not force re-enrollment; rotating `DEVICE_SECRET` requires rebuilding and redeploying the Android agent.
+
+## Verify the install
+
+Create a throwaway script to confirm the instance is healthy:
+
+```typescript title="scripts/verify-mdm.ts"
+import { mdm } from '../src/mdm';
+
+const { devices, total } = await mdm.devices.list({ limit: 1 });
+console.log(`OpenMDM is alive. ${total} devices enrolled.`);
+process.exit(0);
+```
+
+```bash
+pnpm tsx scripts/verify-mdm.ts
+```
+
+If it prints a device count (even zero), you're good.
+
+## Next
+
+- **[Quick Start](/docs/quick-start)** — mount the HTTP routes, enroll a test device, send your first command.
+- **[Architecture](/docs/concepts/architecture)** — how enrollment, heartbeats, and commands actually flow between your server and the device.
+
+---
+
+## Introduction
+
+*URL: https://openmdm.dev/docs/introduction*
+
+*OpenMDM is an embeddable Mobile Device Management SDK you drop into your existing TypeScript application.*
+
+# Introduction
+
+OpenMDM is a Mobile Device Management (MDM) library you **embed in your own backend**, not a separate server you deploy and integrate with. You add a few packages, point the SDK at your existing database, mount a Hono router at `/mdm`, and your app can now enroll, command, and monitor Android devices.
+
+> **This is pre-1.0 software.** The core APIs work and the packages are published to npm, but minor versions may still break the wire protocol before 1.0. Pin exact versions in production.
+
+## Who this is for
+
+- You have an existing Node.js / TypeScript backend (Hono today; Express/Fastify/Next.js adapters are on the roadmap).
+- You need to manage fleet-scale Android devices — kiosk terminals, logistics handhelds, retail POS, field service tablets — and you want that data in the same database your app already uses.
+- You do **not** want to run a separate MDM server, integrate with its API, and reconcile two user models.
+
+If that describes you, OpenMDM is the shortest path from "our app needs device management" to "our app has device management, deployed next to the existing app code."
+
+## Who this is NOT for
+
+- **Consumer BYOD scenarios.** OpenMDM targets company-owned devices in Device Owner mode. It can do Profile Owner too, but the docs and examples here focus on the Device Owner path.
+- **iOS.** OpenMDM is Android-only. Apple's MDM protocol is a different animal and is not on the roadmap.
+- **Regulated zero-trust environments that demand a hardware-rooted identity today.** Hardware-rooted enrollment (Keystore-attested) lands in Phase 2b; until then, enrollment is HMAC-signed but not hardware-attested.
+
+## What the packages actually do
+
+OpenMDM is a monorepo of small packages. You compose the ones you need:
+
+| Package | What it is |
+|---|---|
+| `@openmdm/core` | The SDK itself: device/policy/command managers, event bus, enrollment, webhook delivery. Framework- and database-agnostic — it takes adapters for everything it touches. |
+| `@openmdm/drizzle-adapter` | `DatabaseAdapter` implementation over Drizzle ORM. Supports Postgres, MySQL, and SQLite via the standard Drizzle dialects. |
+| `@openmdm/hono` | HTTP routes. Mounts all `/agent/*` and admin endpoints onto any Hono app. Runs on Node, Bun, Deno, Workers, Vercel. |
+| `@openmdm/push-fcm` | Firebase Cloud Messaging push adapter. Real Firebase Admin SDK, data-only messages, token invalidation. |
+| `@openmdm/push-mqtt` | MQTT push adapter for air-gapped or private fleets without Google Play Services. |
+| `@openmdm/storage-s3` | Presigned URL issuer for APK uploads. Works with AWS S3, MinIO, DigitalOcean Spaces. |
+| `@openmdm/plugin-kiosk` | Kiosk mode lifecycle: enter/exit, lockout on exit-password failures. |
+| `@openmdm/plugin-geofence` | Circular + polygon zones with dwell time and scheduling. |
+| `@openmdm/client` | Device-side SDK consumed by the Android agent. You usually don't touch this unless you're building a custom agent. |
+| `@openmdm/cli` | Admin CLI: `openmdm device list`, `openmdm policy apply`, `openmdm stats`. Talks to your real MDM instance via a config file. |
+
+The minimum viable setup is `core` + `drizzle-adapter` + `hono` + one push provider. Everything else is additive.
+
+## How it fits into your app
+
+OpenMDM does not own a process. It is a library your server already imports:
+
+```
+┌────────────────── Your backend (Hono, Node) ───────────────────┐
+│                                                                │
+│   Your routes         OpenMDM routes        Your jobs          │
+│   /api/*              /mdm/* (mounted)      cron, queues       │
+│       │                     │                   │              │
+│       └─────────────┬───────┴─────┬─────────────┘              │
+│                     ▼             ▼                            │
+│             createMDM({ database, push, plugins })             │
+│                     │             │                            │
+│                     ▼             ▼                            │
+│             Your Postgres    FCM / MQTT                        │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+                             ▲
+                             │ HTTPS + FCM
+                             ▼
+                      ┌─────────────┐
+                      │  Android    │  (openmdm-android agent,
+                      │   device    │   separate repo)
+                      └─────────────┘
+```
+
+A single `createMDM()` call returns an `MDMInstance` with managers (`devices`, `policies`, `commands`, `apps`, `groups`) and an event bus. Your own code calls those managers directly — same process, same transaction boundary, same database.
+
+## Where to go next
+
+- **[Installation](/docs/installation)** — the real packages, the real config shape.
+- **[Quick Start](/docs/quick-start)** — end-to-end working example against Hono + Postgres + FCM.
+- **[Architecture](/docs/concepts/architecture)** — the control flow for enrollment, heartbeats, and commands. Read this before making architectural decisions.
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the single most confusing distinction for newcomers. Read before writing any policy.
+- **[Agent Wire Protocol](/docs/concepts/agent-protocol)** — why `/agent/*` responses use an envelope and how v1/v2 coexist during rollout.
+
+---
+
+## Quick Start
+
+*URL: https://openmdm.dev/docs/quick-start*
+
+*From nothing to an enrolled device in about 15 minutes.*
+
+# Quick Start
+
+By the end of this page, you will have:
+
+1. A Hono server with OpenMDM's routes mounted.
+2. A device enrolled in development mode (no real Android agent needed for the first pass).
+3. A policy applied and a remote command queued.
+
+This follows on from [Installation](/docs/installation) — you should already have `src/mdm.ts` exporting a configured `MDMInstance`.
+
+## 1. Mount the HTTP routes
+
+Create your Hono entrypoint and `.route('/mdm', honoAdapter(mdm))` to expose every OpenMDM endpoint under `/mdm`:
+
+```typescript title="src/server.ts"
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { honoAdapter } from '@openmdm/hono';
+import { mdm } from './mdm';
+
+const app = new Hono();
+
+// Your own routes can live alongside OpenMDM's.
+app.get('/', (c) => c.text('hello from my app'));
+
+// All agent + admin endpoints. See the Agent Wire Protocol page
+// for what actually lives under /mdm/agent/*.
+app.route('/mdm', honoAdapter(mdm));
+
+serve({ fetch: app.fetch, port: 3000 });
+console.log('listening on http://localhost:3000');
+```
+
+Start it:
+
+```bash
+pnpm tsx src/server.ts
+```
+
+You should see requests to `/mdm/agent/config` return a 401 (no device token yet) — that's the middleware working.
+
+## 2. Create a policy
+
+Before enrolling anything, create a baseline policy devices will apply on first contact. For a working example, use kiosk mode that locks the device to a single test app:
+
+```typescript title="scripts/seed-policy.ts"
+import { mdm } from '../src/mdm';
+
+const policy = await mdm.policies.create({
+  name: 'Default Kiosk',
+  description: 'Locks devices to the reference app',
+  isDefault: true,
+  settings: {
+    kioskMode: true,
+    mainApp: 'com.example.kioskapp',
+    lockStatusBar: true,
+    lockNavigationBar: true,
+  },
+});
+
+console.log('Created policy:', policy.id);
+```
+
+```bash
+pnpm tsx scripts/seed-policy.ts
+```
+
+Because `isDefault: true`, any device that enrolls without an explicit policy assignment will receive this one on its first heartbeat.
+
+## 3. Subscribe to events
+
+Event handlers live in the same process as the SDK. Register them at boot time so you know what the fleet is doing:
+
+```typescript title="src/mdm.ts (append)"
+mdm.on('device.enrolled', async (event) => {
+  console.log(`[mdm] ${event.payload.device.id} just enrolled`);
+});
+
+mdm.on('device.heartbeat', async (event) => {
+  console.log(
+    `[mdm] ${event.payload.device.id} heartbeat, battery ${event.payload.heartbeat.batteryLevel}%`,
+  );
+});
+
+mdm.on('command.completed', async (event) => {
+  console.log(`[mdm] command ${event.payload.commandId} done`);
+});
+```
+
+See the full list in [Events](/docs/reference/events).
+
+## 4. Enroll a test device
+
+In production, devices enroll via a QR code scanned by the Android agent. For local development, call the manager directly:
+
+```typescript title="scripts/enroll-test-device.ts"
+import { mdm } from '../src/mdm';
+import { createHmac } from 'crypto';
+
+const SECRET = process.env.DEVICE_SECRET!;
+const timestamp = new Date().toISOString();
+
+// The canonical signing form is maintained by @openmdm/client for
+// the real agent. Here we inline it for a dev harness.
+const request = {
+  model: 'Pixel 7',
+  manufacturer: 'Google',
+  osVersion: '14',
+  serialNumber: 'DEV-SN-0001',
+  imei: '',
+  macAddress: '',
+  androidId: 'dev-android-0001',
+  method: 'manual' as const,
+  timestamp,
+};
+
+const message = [
+  request.model,
+  request.manufacturer,
+  request.osVersion,
+  request.serialNumber,
+  request.imei,
+  request.macAddress,
+  request.androidId,
+  request.method,
+  request.timestamp,
+].join('|');
+
+const signature = createHmac('sha256', SECRET).update(message).digest('hex');
+
+const response = await mdm.enroll({ ...request, signature });
+console.log('Enrolled:', response.deviceId);
+console.log('Device token:', response.token);
+```
+
+> **Why so manual?** Because the enrollment signature is the library's security boundary, not a convenience helper. We show the real canonical form here so you can audit it. Production agents use `generateEnrollmentSignature()` from `@openmdm/client`, which computes the same thing.
+
+Run it:
+
+```bash
+pnpm tsx scripts/enroll-test-device.ts
+```
+
+You should see the `[mdm] ... just enrolled` log from your event handler fire.
+
+## 5. Send a command
+
+Commands are queued to the database and delivered over push the next time the device is reachable. The managers expose one-shot helpers for the common types:
+
+```typescript
+// Tell the device to sync immediately (no payload)
+await mdm.devices.sync(deviceId);
+
+// Lock the screen with an optional message
+await mdm.devices.lock(deviceId, 'Return this device to IT');
+
+// Factory reset, optionally preserving SD card data
+await mdm.devices.wipe(deviceId, true);
+
+// Reboot
+await mdm.devices.reboot(deviceId);
+```
+
+Need a type that doesn't have a shortcut? Use `sendCommand`:
+
+```typescript
+await mdm.devices.sendCommand(deviceId, {
+  type: 'installApp',
+  payload: {
+    packageName: 'com.example.app',
+    downloadUrl: 'https://cdn.example.com/app.apk',
+  },
+});
+```
+
+The full set of command types is in [Commands vs Policies](/docs/concepts/commands-and-policies).
+
+## 6. Query the fleet
+
+```typescript
+// All enrolled devices, newest first
+const { devices, total } = await mdm.devices.list({
+  status: 'enrolled',
+  limit: 50,
+});
+console.log(`${total} devices enrolled`);
+
+// One device
+const device = await mdm.devices.get(deviceId);
+console.log('Last seen:', device?.lastHeartbeat);
+console.log('Battery:', device?.batteryLevel);
+console.log('Policy:', device?.policyId);
+```
+
+Or use the CLI for the same thing from a shell:
+
+```bash
+npx openmdm device list
+npx openmdm device show <deviceId>
+npx openmdm stats
+```
+
+See [CLI](/docs/reference/cli) for the full command list.
+
+## You're done
+
+What you just built:
+
+- A Hono server with OpenMDM mounted at `/mdm`.
+- A default kiosk policy seeded in the database.
+- A test device enrolled with a signed payload.
+- An event handler that logs enrollments and heartbeats.
+- A command queued for the device.
+
+What you still need for production:
+
+- A real Android agent built from [`openmdm-android`](https://github.com/openmdm/openmdm-android) with your `DEVICE_SECRET` compiled in.
+- A Firebase project with FCM credentials, or an MQTT broker.
+- Webhook receivers for anything your business cares about. See [Webhooks Recipe](/docs/recipes/webhooks).
+- A proper authorization layer on the admin-side endpoints. OpenMDM authenticates *devices* for you; authenticating *admins* is your job.
+
+## Where to go next
+
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the distinction that will save you from writing `sendCommand` calls inside policy logic.
+- **[Architecture](/docs/concepts/architecture)** — the data flow for enrollment, heartbeats, and command delivery. Read before optimizing anything.
+- **[Webhooks Recipe](/docs/recipes/webhooks)** — receive HMAC-signed events in an external system with a copy-pastable verifier.
+- **[Kiosk Recipe](/docs/recipes/kiosk)** — enable kiosk mode correctly, including how to let an admin unlock a stuck device.
+
+---
+
+## Kiosk Recipe
+
+*URL: https://openmdm.dev/docs/recipes/kiosk*
+
+*Lock devices to a single app, handle exit attempts, and unlock stuck devices.*
+
+# Kiosk Recipe
+
+Kiosk mode is the most common reason teams adopt MDM. You have a fleet of devices running exactly one app — a POS terminal, a check-in kiosk, a digital sign — and you need the device to boot into that app, stay in it, and refuse to do anything else.
+
+This recipe covers the full lifecycle: enabling kiosk via policy, handling exit attempts, and unlocking a stuck device when a lockout triggers.
+
+## Enable the plugin
+
+Kiosk is shipped as an optional plugin. Add it to your `createMDM` config:
+
+```typescript title="src/mdm.ts"
+import { createMDM } from '@openmdm/core';
+import { kioskPlugin } from '@openmdm/plugin-kiosk';
+
+export const mdm = createMDM({
+  database: drizzleAdapter(db),
+  push: fcmPushAdapter({ ... }),
+  enrollment: { deviceSecret: process.env.DEVICE_SECRET! },
+  auth: { deviceTokenSecret: process.env.JWT_SECRET! },
+
+  plugins: [
+    kioskPlugin({
+      // Fallback exit password if the policy doesn't set one.
+      defaultExitPassword: process.env.KIOSK_EXIT_PASSWORD!,
+
+      // Let an admin exit kiosk mode via a command from the server,
+      // not just via the on-device password.
+      allowRemoteExit: true,
+
+      // Restart the kiosk app automatically if it crashes.
+      lockOnCrash: false,
+      autoRestart: true,
+      autoRestartDelay: 2000,
+
+      // After 5 wrong exit passwords, lock the device for 15 minutes.
+      // This is the UX that prevents someone from brute-forcing at the
+      // kiosk screen while you're not looking.
+      maxExitAttempts: 5,
+      lockoutDuration: 15,
+    }),
+  ],
+});
+```
+
+Plugins register routes, hooks, and state tracking at instance creation. Once the plugin is loaded, it wires itself into the policy application flow automatically — you don't need to import anything else to use it.
+
+## Create a kiosk policy
+
+Kiosk settings live on the policy, not on the plugin options. The plugin is the *engine*; the policy is the *configuration*:
+
+```typescript
+const kioskPolicy = await mdm.policies.create({
+  name: 'Retail POS Kiosk',
+  description: 'Locks devices to the POS app with status bar hidden',
+  isDefault: true,
+  settings: {
+    kioskMode: true,
+    mainApp: 'com.example.pos',
+    lockStatusBar: true,
+    lockNavigationBar: true,
+    disableHomeButton: true,
+    disableRecentApps: true,
+  },
+});
+```
+
+Fields available in `PolicySettings` for kiosk behavior:
+
+| Field | Type | Effect |
+|---|---|---|
+| `kioskMode` | `boolean` | Master switch. Plugin is a no-op unless this is `true`. |
+| `mainApp` | `string` | Package name of the app the device is locked to. Required when `kioskMode: true`. |
+| `allowedApps` | `string[]` | For multi-app kiosk scenarios. Users can only launch apps in this list. |
+| `lockStatusBar` | `boolean` | Hide the status bar entirely. |
+| `lockNavigationBar` | `boolean` | Hide the nav bar (back/home/recents). |
+| `disableHomeButton` | `boolean` | Intercept the home button. |
+| `disableRecentApps` | `boolean` | Intercept the recent-apps button. |
+| `disablePowerButton` | `boolean` | Soft-disable the power button (the hardware button still works, but short-presses are eaten). |
+| `disableVolumeButtons` | `boolean` | Silence the volume rockers. |
+| `kioskExitPassword` | `string` | Per-policy override of the plugin's `defaultExitPassword`. |
+
+All of these are honored by the Android agent through the Device Policy Manager API. The server-side SDK just ensures the settings are delivered correctly — the enforcement happens on the device.
+
+## Assign the policy
+
+```typescript
+// A specific device
+await mdm.devices.assignPolicy(deviceId, kioskPolicy.id);
+
+// Or as the default — every new device that enrolls without an
+// explicit assignment inherits this policy
+await mdm.policies.setDefault(kioskPolicy.id);
+```
+
+Devices pick up the new policy on their next heartbeat. Expect a 0–60s delay depending on your heartbeat interval.
+
+## Handle exit attempts
+
+When a user tries to exit kiosk mode (by entering a password or triggering a gesture), the device calls one of the plugin's routes. The plugin emits events you can subscribe to:
+
+```typescript
+mdm.on('security.tamper', async (event) => {
+  if (event.payload.type === 'kiosk.exit-attempt') {
+    const { deviceId, attempts, lockedOut } = event.payload;
+    console.warn(
+      `[kiosk] exit attempt ${attempts} on ${deviceId}${lockedOut ? ' (LOCKED OUT)' : ''}`,
+    );
+
+    if (lockedOut) {
+      await alertOps({
+        channel: 'security',
+        text: `Device ${deviceId} is locked out for 15 minutes after ${attempts} failed kiosk exit attempts`,
+      });
+    }
+  }
+});
+```
+
+Exit-attempt state is tracked per-device by the plugin. The counter resets on a successful exit (correct password) or when the lockout timer expires.
+
+## Unlock a stuck device
+
+Two failure modes you need to be able to recover from:
+
+### Failure mode 1: lockout timer still running
+
+When a device is locked out, it will refuse further exit attempts until the timer expires. If you need to unlock it earlier (e.g. an admin is on site and needs access), send a remote exit command:
+
+```typescript
+await mdm.devices.sendCommand(deviceId, {
+  type: 'exitKiosk',
+  payload: {
+    // The server-side override password you set via defaultExitPassword
+    // or kioskExitPassword on the policy.
+    password: process.env.KIOSK_EXIT_PASSWORD!,
+  },
+});
+```
+
+The device executes the command on its next heartbeat (or sooner if the push wakes it up). The command also clears the lockout state and resets the exit-attempt counter.
+
+> `allowRemoteExit: true` must be set on the plugin for this to work. It's a deliberate footgun — if you don't trust your own admin-side auth, you don't want to expose a remote exit path.
+
+### Failure mode 2: wrong `mainApp` package
+
+If you ship a policy with a typo in `mainApp`, the device will lock itself to an app that doesn't exist and become unrecoverable from the UI. To fix this **remotely**, push an updated policy that points to a valid app, then trigger an immediate sync:
+
+```typescript
+await mdm.policies.update(policy.id, {
+  settings: { ...currentSettings, mainApp: 'com.example.correct' },
+});
+
+await mdm.devices.sync(deviceId); // force a heartbeat now
+```
+
+If the device has completely lost connectivity and can't heartbeat, there is no remote recovery and you need physical access. The safest prevention is to always test new kiosk policies on **one** device before promoting them to the fleet default. The CLI makes this easy:
+
+```bash
+npx openmdm policy create --file test-kiosk.json
+npx openmdm policy apply <policyId> <one-test-device-id>
+# verify manually, then
+npx openmdm policy apply <policyId> <every-other-device>
+```
+
+## Testing your kiosk policy
+
+Because kiosk mistakes can brick real hardware, you want a testing loop tight enough to iterate in minutes:
+
+1. **Run the dev enrollment harness** ([Quick Start §4](/docs/quick-start)) against a test device or emulator.
+2. **Assign the kiosk policy** to just that device.
+3. **Observe in the `device.heartbeat` event handler** that the device reports the policy as applied.
+4. **Try to exit** — first with the wrong password, then the right one. Watch for the `security.tamper` event.
+5. **Hit the lockout limit** to verify the counter and timer work.
+6. **Use the CLI** (`openmdm device show <id>`) to confirm policy state from outside your app.
+
+Once you're confident, promote the policy to default or assign it to a group.
+
+## Where to go next
+
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — why kiosk config lives on the policy, not the plugin options.
+- **[Webhooks Recipe](/docs/recipes/webhooks)** — wire the `security.tamper` events to Slack or PagerDuty for live fleet alerts.
+
+---
+
+## Webhooks Recipe
+
+*URL: https://openmdm.dev/docs/recipes/webhooks*
+
+*Send HMAC-signed webhooks to an external system and verify them on the receiver.*
+
+# Webhooks Recipe
+
+This recipe shows how to configure outbound webhooks in OpenMDM and how to verify them on the receiving end. It is the path to take when a different system — an analytics pipeline, a ticketing system, a Slack bot — needs to react to device events.
+
+## When to use webhooks
+
+- The receiver is a **different process** (or different machine, or different language).
+- You want **at-least-once** delivery with retries.
+- You want the receiver to be able to **verify the sender cryptographically**.
+
+If the receiver is the same Node process as your MDM instance, **don't use webhooks**. Use the event bus (`mdm.on('device.enrolled', ...)`) — it's faster, typesafe, and needs no signing. Webhooks are for inter-service communication, not intra-process.
+
+## Configure outbound delivery
+
+Webhooks are part of the `createMDM` config:
+
+```typescript title="src/mdm.ts"
+import { createMDM } from '@openmdm/core';
+import { drizzleAdapter } from '@openmdm/drizzle-adapter';
+import { fcmPushAdapter } from '@openmdm/push-fcm';
+
+export const mdm = createMDM({
+  database: drizzleAdapter(db),
+  push: fcmPushAdapter({ credentialPath: './firebase-service-account.json' }),
+  enrollment: { deviceSecret: process.env.DEVICE_SECRET! },
+  auth: { deviceTokenSecret: process.env.JWT_SECRET! },
+
+  webhooks: {
+    signingSecret: process.env.WEBHOOK_SECRET!,
+
+    // Exponential backoff defaults: 3 retries, 1s → 2s → 4s → 8s (capped)
+    retry: { maxRetries: 3, initialDelay: 1000, maxDelay: 30000 },
+
+    endpoints: [
+      {
+        id: 'analytics',
+        url: 'https://analytics.example.com/mdm/events',
+        events: ['device.enrolled', 'device.unenrolled', 'command.completed'],
+        enabled: true,
+      },
+      {
+        id: 'slack-alerts',
+        url: 'https://hooks.slack.com/services/TXXX/BXXX/secret',
+        events: ['security.tamper', 'security.rootDetected'],
+        enabled: true,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+      {
+        id: 'everything',
+        url: 'https://ops.example.com/mdm-firehose',
+        // Wildcard matches every event type. Useful for an audit log
+        // sink, but be deliberate about it — fleet-scale event volume
+        // is nontrivial.
+        events: ['*'],
+        enabled: true,
+      },
+    ],
+  },
+});
+```
+
+Each endpoint has its own `events` filter, so one webhook can be interested in only enrollments while another is interested in only security events. The `'*'` wildcard matches everything.
+
+## What the request looks like
+
+OpenMDM POSTs a JSON body to each endpoint:
+
+```http
+POST /mdm/events HTTP/1.1
+Content-Type: application/json
+X-OpenMDM-Event: device.enrolled
+X-OpenMDM-Delivery: 7f3e9c20-9a8f-4e2a-8e29-4b5f0a3c0d10
+X-OpenMDM-Timestamp: 2026-04-15T12:00:00.000Z
+X-OpenMDM-Signature: sha256=a3f...0b2
+
+{
+  "id": "7f3e9c20-9a8f-4e2a-8e29-4b5f0a3c0d10",
+  "event": "device.enrolled",
+  "timestamp": "2026-04-15T12:00:00.000Z",
+  "data": {
+    "device": { "id": "dev_123", "enrollmentId": "SN-0001", ... }
+  }
+}
+```
+
+Four headers you'll care about:
+
+- **`X-OpenMDM-Event`** — the event type, same as the union in `EventType`.
+- **`X-OpenMDM-Delivery`** — a unique id for this delivery attempt. Useful for deduping if a retry lands the same payload twice.
+- **`X-OpenMDM-Timestamp`** — ISO 8601 timestamp when the event was generated.
+- **`X-OpenMDM-Signature`** — `sha256=` followed by the hex-encoded HMAC-SHA256 of the **exact raw request body** under your `signingSecret`.
+
+## Verify the signature (the easy way)
+
+If your receiver is also a Node process, use the verifier exported from `@openmdm/core`:
+
+```typescript title="receiver.ts"
+import express from 'express';
+import { verifyWebhookSignature } from '@openmdm/core';
+
+const app = express();
+
+// IMPORTANT: capture the raw body. Do NOT pre-parse JSON, because the
+// signature is over the bytes as sent, not over a re-serialized form.
+app.use('/mdm/events', express.raw({ type: 'application/json' }));
+
+app.post('/mdm/events', (req, res) => {
+  const signature = req.header('X-OpenMDM-Signature');
+  const body = (req.body as Buffer).toString('utf8');
+
+  if (!signature || !verifyWebhookSignature(body, signature, process.env.WEBHOOK_SECRET!)) {
+    return res.status(401).send('invalid signature');
+  }
+
+  const payload = JSON.parse(body);
+  console.log(`received ${payload.event}:`, payload.data);
+
+  // Return 2xx within 30s or OpenMDM will retry. Do real work async.
+  res.status(202).send('accepted');
+});
+
+app.listen(4000);
+```
+
+`verifyWebhookSignature` does a constant-time comparison, so it's safe against timing oracles. The function is exported from `@openmdm/core` specifically for this use case — you don't need to import the full SDK into your receiver process.
+
+## Verify the signature (from a non-Node receiver)
+
+Any language with an HMAC-SHA256 primitive can verify. The algorithm:
+
+1. Take the raw request body bytes.
+2. Compute `HMAC_SHA256(signingSecret, body)`.
+3. Hex-encode the result.
+4. Prefix it with `sha256=`.
+5. Compare against the `X-OpenMDM-Signature` header using a **constant-time comparison**.
+
+Python example:
+
+```python
+import hmac, hashlib
+
+def verify(body: bytes, header: str, secret: str) -> bool:
+    expected = 'sha256=' + hmac.new(
+        secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(header, expected)
+```
+
+Go example:
+
+```go
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+)
+
+func verify(body []byte, header, secret string) bool {
+    mac := hmac.New(sha256.New, []byte(secret))
+    mac.Write(body)
+    expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+    return hmac.Equal([]byte(header), []byte(expected))
+}
+```
+
+## Retry semantics
+
+OpenMDM's webhook manager uses exponential backoff and a simple rule:
+
+- **2xx** → success, no retry.
+- **4xx except 429** → permanent failure, no retry. (If your receiver says "bad request," retrying won't fix it.)
+- **429** → retry with backoff.
+- **5xx** → retry with backoff.
+- **Network error or timeout (30s default)** → retry with backoff.
+
+With the default config, the delivery timeline for a 5xx loop is:
+
+```
+t=0s     attempt 1
+t=1s     attempt 2 (after 1s backoff)
+t=3s     attempt 3 (after 2s backoff)
+t=7s     attempt 4 (after 4s backoff)
+t=7s     give up, log failure
+```
+
+If your receiver needs more than three attempts, bump `retry.maxRetries` — but think about why. Usually a long retry tail means your receiver is overloaded, and more retries make it worse.
+
+## Dedup on the receiver
+
+Because retries are a real possibility, the receiver should treat `X-OpenMDM-Delivery` as an idempotency key:
+
+```typescript
+const delivery = req.header('X-OpenMDM-Delivery')!;
+
+if (await db.webhookDeliveries.hasSeen(delivery)) {
+  return res.status(200).send('already processed');
+}
+
+await db.transaction(async (tx) => {
+  await processPayload(payload, tx);
+  await tx.webhookDeliveries.mark(delivery);
+});
+```
+
+A retry of a successfully processed event returns 200 and does nothing. A retry of a failed event re-runs the work. This is the "at-least-once, exactly-once if you try" pattern that OpenMDM's webhook manager is built around.
+
+## Where to go next
+
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the event bus is also how you react to command state transitions.
+- **[Kiosk Recipe](/docs/recipes/kiosk)** — a recipe that pairs webhooks with the kiosk plugin to alert on kiosk-exit attempts.
+
+---

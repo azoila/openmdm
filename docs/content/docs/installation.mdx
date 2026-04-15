@@ -1,94 +1,145 @@
 ---
 title: Installation
-description: Learn how to install and set up OpenMDM in your project.
+description: Install OpenMDM, set up your database schema, and create your first MDMInstance.
 ---
 
 # Installation
 
-This guide will help you install OpenMDM and its dependencies.
+This page gets you from zero to a working `MDMInstance` you can call methods on. The next page ([Quick Start](/docs/quick-start)) wires it into a running HTTP server.
 
 ## Prerequisites
 
-Before you begin, ensure you have:
+- **Node.js 20+** (or Bun 1.1+, or Deno 1.40+).
+- **A database** supported by Drizzle ORM — Postgres, MySQL, or SQLite. All examples here use Postgres.
+- **A push provider.** For public fleets with Google Play Services, use **FCM** (a Firebase project and a service-account JSON). For private networks or GMS-less devices, use **MQTT** with your own broker.
 
-- Node.js 20 or later
-- npm, yarn, or pnpm
-- A Firebase project (for FCM push notifications)
+OpenMDM does **not** need a Firebase or FCM setup during development if you use MQTT or skip push entirely — but a push provider is mandatory for any real fleet, because commands are delivered via push wake-up.
 
-## Install Packages
+## Install the packages
 
-Install the core package and your preferred storage/push adapters:
+The minimum set:
 
 ```bash
-# Using npm
-npm install @openmdm/core @openmdm/storage-sqlite @openmdm/push-fcm
-
-# Using yarn
-yarn add @openmdm/core @openmdm/storage-sqlite @openmdm/push-fcm
-
-# Using pnpm
-pnpm add @openmdm/core @openmdm/storage-sqlite @openmdm/push-fcm
+pnpm add @openmdm/core @openmdm/drizzle-adapter @openmdm/hono @openmdm/push-fcm
+pnpm add drizzle-orm postgres hono
 ```
 
-## Available Packages
+`drizzle-orm` and `postgres` are peer-like deps that live in your app, not ours. `hono` is the HTTP framework — if you're already on Hono, you already have it.
 
-### Core
+If you're using MQTT instead of FCM:
 
-| Package | Description |
-|---------|-------------|
-| `@openmdm/core` | Core MDM server SDK |
+```bash
+pnpm add @openmdm/push-mqtt
+```
 
-### Storage Adapters
+If you want APK hosting via presigned URLs:
 
-| Package | Description |
-|---------|-------------|
-| `@openmdm/storage-sqlite` | SQLite storage adapter |
-| `@openmdm/storage-postgres` | PostgreSQL storage adapter |
-| `@openmdm/storage-memory` | In-memory storage (for testing) |
+```bash
+pnpm add @openmdm/storage-s3
+```
 
-### Push Providers
+## Generate the database schema
 
-| Package | Description |
-|---------|-------------|
-| `@openmdm/push-fcm` | Firebase Cloud Messaging |
-| `@openmdm/push-hms` | Huawei Mobile Services |
+OpenMDM ships its schema as a Drizzle-compatible definition you can generate into your project. The CLI writes it to a file you manage with `drizzle-kit`:
 
-## Basic Setup
+```bash
+npx openmdm generate --adapter drizzle --provider pg --output ./src/db/schema.ts
+```
 
-Create a new file for your MDM server:
+Then run Drizzle's normal migration workflow:
 
-```typescript title="mdm-server.ts"
-import { createMDMServer } from '@openmdm/core';
-import { sqliteStorage } from '@openmdm/storage-sqlite';
-import { fcmPush } from '@openmdm/push-fcm';
+```bash
+npx drizzle-kit generate
+npx drizzle-kit migrate
+```
 
-export const mdm = createMDMServer({
-  // Storage configuration
-  storage: sqliteStorage({
-    filename: './data/mdm.db',
+This creates the `mdm_devices`, `mdm_policies`, `mdm_commands`, `mdm_events`, `mdm_groups`, `mdm_applications`, `mdm_push_tokens`, and `mdm_app_deployments` tables in your existing database, alongside your app's own tables.
+
+> **Why no separate database?** That's the whole point. OpenMDM writes into your Postgres so device state, user state, and business data live in one transactional world.
+
+## Create the MDM instance
+
+Create one file — convention is `src/mdm.ts` — that exports a single configured `MDMInstance`:
+
+```typescript title="src/mdm.ts"
+import { createMDM } from '@openmdm/core';
+import { drizzleAdapter } from '@openmdm/drizzle-adapter';
+import { fcmPushAdapter } from '@openmdm/push-fcm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+
+const client = postgres(process.env.DATABASE_URL!);
+const db = drizzle(client);
+
+export const mdm = createMDM({
+  database: drizzleAdapter(db),
+
+  push: fcmPushAdapter({
+    credentialPath: './firebase-service-account.json',
+    // Data-only messages keep the agent in control of how the
+    // notification is surfaced — important for silent commands.
+    dataOnly: true,
   }),
 
-  // Push notification configuration
-  push: fcmPush({
-    projectId: process.env.FIREBASE_PROJECT_ID!,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY!,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL!,
-  }),
+  enrollment: {
+    // HMAC secret used to sign enrollment payloads. Must match the
+    // secret compiled into the Android agent build. Rotate by
+    // rebuilding the agent and the server in lockstep.
+    deviceSecret: process.env.DEVICE_SECRET!,
+    autoEnroll: true,
+  },
+
+  auth: {
+    // Secret used to sign device-facing JWTs after enrollment.
+    deviceTokenSecret: process.env.JWT_SECRET!,
+  },
+
+  serverUrl: process.env.SERVER_URL, // e.g. "https://mdm.example.com"
 });
 ```
 
-## Environment Variables
+That's the whole SDK boot. `mdm` is an object with `mdm.devices`, `mdm.policies`, `mdm.commands`, `mdm.apps`, `mdm.groups`, `mdm.push`, `mdm.on(...)`, and more. You import it anywhere in your app that needs to talk to devices.
 
-Create a `.env` file with your configuration:
+## Environment variables
 
 ```bash title=".env"
-# Firebase Configuration
-FIREBASE_PROJECT_ID=your-project-id
-FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com
+# Database
+DATABASE_URL=postgres://user:password@localhost:5432/yourapp
+
+# Enrollment HMAC secret — must match the Android agent's compiled-in secret
+DEVICE_SECRET=<64-char hex; generate with `openssl rand -hex 32`>
+
+# Device token signing secret (separate from DEVICE_SECRET by design)
+JWT_SECRET=<64-char hex; generate with `openssl rand -hex 32`>
+
+# Public base URL of your backend
+SERVER_URL=https://mdm.example.com
+
+# Firebase (if using FCM)
+# OR provide credentialPath to a service-account JSON
 ```
 
-## Next Steps
+> **Two secrets, not one.** `DEVICE_SECRET` signs enrollment payloads (proves a device is allowed to enroll). `JWT_SECRET` signs the device tokens returned after successful enrollment (proves a subsequent request is from an enrolled device). Rotating `JWT_SECRET` invalidates all device sessions but does not force re-enrollment; rotating `DEVICE_SECRET` requires rebuilding and redeploying the Android agent.
 
-- [Quick Start](/docs/quick-start) - Create your first device enrollment
-- [Configuration](/docs/configuration) - Learn about all configuration options
+## Verify the install
+
+Create a throwaway script to confirm the instance is healthy:
+
+```typescript title="scripts/verify-mdm.ts"
+import { mdm } from '../src/mdm';
+
+const { devices, total } = await mdm.devices.list({ limit: 1 });
+console.log(`OpenMDM is alive. ${total} devices enrolled.`);
+process.exit(0);
+```
+
+```bash
+pnpm tsx scripts/verify-mdm.ts
+```
+
+If it prints a device count (even zero), you're good.
+
+## Next
+
+- **[Quick Start](/docs/quick-start)** — mount the HTTP routes, enroll a test device, send your first command.
+- **[Architecture](/docs/concepts/architecture)** — how enrollment, heartbeats, and commands actually flow between your server and the device.

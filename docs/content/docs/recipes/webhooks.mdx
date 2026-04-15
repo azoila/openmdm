@@ -1,0 +1,219 @@
+---
+title: Webhooks Recipe
+description: Send HMAC-signed webhooks to an external system and verify them on the receiver.
+---
+
+# Webhooks Recipe
+
+This recipe shows how to configure outbound webhooks in OpenMDM and how to verify them on the receiving end. It is the path to take when a different system — an analytics pipeline, a ticketing system, a Slack bot — needs to react to device events.
+
+## When to use webhooks
+
+- The receiver is a **different process** (or different machine, or different language).
+- You want **at-least-once** delivery with retries.
+- You want the receiver to be able to **verify the sender cryptographically**.
+
+If the receiver is the same Node process as your MDM instance, **don't use webhooks**. Use the event bus (`mdm.on('device.enrolled', ...)`) — it's faster, typesafe, and needs no signing. Webhooks are for inter-service communication, not intra-process.
+
+## Configure outbound delivery
+
+Webhooks are part of the `createMDM` config:
+
+```typescript title="src/mdm.ts"
+import { createMDM } from '@openmdm/core';
+import { drizzleAdapter } from '@openmdm/drizzle-adapter';
+import { fcmPushAdapter } from '@openmdm/push-fcm';
+
+export const mdm = createMDM({
+  database: drizzleAdapter(db),
+  push: fcmPushAdapter({ credentialPath: './firebase-service-account.json' }),
+  enrollment: { deviceSecret: process.env.DEVICE_SECRET! },
+  auth: { deviceTokenSecret: process.env.JWT_SECRET! },
+
+  webhooks: {
+    signingSecret: process.env.WEBHOOK_SECRET!,
+
+    // Exponential backoff defaults: 3 retries, 1s → 2s → 4s → 8s (capped)
+    retry: { maxRetries: 3, initialDelay: 1000, maxDelay: 30000 },
+
+    endpoints: [
+      {
+        id: 'analytics',
+        url: 'https://analytics.example.com/mdm/events',
+        events: ['device.enrolled', 'device.unenrolled', 'command.completed'],
+        enabled: true,
+      },
+      {
+        id: 'slack-alerts',
+        url: 'https://hooks.slack.com/services/TXXX/BXXX/secret',
+        events: ['security.tamper', 'security.rootDetected'],
+        enabled: true,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+      {
+        id: 'everything',
+        url: 'https://ops.example.com/mdm-firehose',
+        // Wildcard matches every event type. Useful for an audit log
+        // sink, but be deliberate about it — fleet-scale event volume
+        // is nontrivial.
+        events: ['*'],
+        enabled: true,
+      },
+    ],
+  },
+});
+```
+
+Each endpoint has its own `events` filter, so one webhook can be interested in only enrollments while another is interested in only security events. The `'*'` wildcard matches everything.
+
+## What the request looks like
+
+OpenMDM POSTs a JSON body to each endpoint:
+
+```http
+POST /mdm/events HTTP/1.1
+Content-Type: application/json
+X-OpenMDM-Event: device.enrolled
+X-OpenMDM-Delivery: 7f3e9c20-9a8f-4e2a-8e29-4b5f0a3c0d10
+X-OpenMDM-Timestamp: 2026-04-15T12:00:00.000Z
+X-OpenMDM-Signature: sha256=a3f...0b2
+
+{
+  "id": "7f3e9c20-9a8f-4e2a-8e29-4b5f0a3c0d10",
+  "event": "device.enrolled",
+  "timestamp": "2026-04-15T12:00:00.000Z",
+  "data": {
+    "device": { "id": "dev_123", "enrollmentId": "SN-0001", ... }
+  }
+}
+```
+
+Four headers you'll care about:
+
+- **`X-OpenMDM-Event`** — the event type, same as the union in `EventType`.
+- **`X-OpenMDM-Delivery`** — a unique id for this delivery attempt. Useful for deduping if a retry lands the same payload twice.
+- **`X-OpenMDM-Timestamp`** — ISO 8601 timestamp when the event was generated.
+- **`X-OpenMDM-Signature`** — `sha256=` followed by the hex-encoded HMAC-SHA256 of the **exact raw request body** under your `signingSecret`.
+
+## Verify the signature (the easy way)
+
+If your receiver is also a Node process, use the verifier exported from `@openmdm/core`:
+
+```typescript title="receiver.ts"
+import express from 'express';
+import { verifyWebhookSignature } from '@openmdm/core';
+
+const app = express();
+
+// IMPORTANT: capture the raw body. Do NOT pre-parse JSON, because the
+// signature is over the bytes as sent, not over a re-serialized form.
+app.use('/mdm/events', express.raw({ type: 'application/json' }));
+
+app.post('/mdm/events', (req, res) => {
+  const signature = req.header('X-OpenMDM-Signature');
+  const body = (req.body as Buffer).toString('utf8');
+
+  if (!signature || !verifyWebhookSignature(body, signature, process.env.WEBHOOK_SECRET!)) {
+    return res.status(401).send('invalid signature');
+  }
+
+  const payload = JSON.parse(body);
+  console.log(`received ${payload.event}:`, payload.data);
+
+  // Return 2xx within 30s or OpenMDM will retry. Do real work async.
+  res.status(202).send('accepted');
+});
+
+app.listen(4000);
+```
+
+`verifyWebhookSignature` does a constant-time comparison, so it's safe against timing oracles. The function is exported from `@openmdm/core` specifically for this use case — you don't need to import the full SDK into your receiver process.
+
+## Verify the signature (from a non-Node receiver)
+
+Any language with an HMAC-SHA256 primitive can verify. The algorithm:
+
+1. Take the raw request body bytes.
+2. Compute `HMAC_SHA256(signingSecret, body)`.
+3. Hex-encode the result.
+4. Prefix it with `sha256=`.
+5. Compare against the `X-OpenMDM-Signature` header using a **constant-time comparison**.
+
+Python example:
+
+```python
+import hmac, hashlib
+
+def verify(body: bytes, header: str, secret: str) -> bool:
+    expected = 'sha256=' + hmac.new(
+        secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(header, expected)
+```
+
+Go example:
+
+```go
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+)
+
+func verify(body []byte, header, secret string) bool {
+    mac := hmac.New(sha256.New, []byte(secret))
+    mac.Write(body)
+    expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+    return hmac.Equal([]byte(header), []byte(expected))
+}
+```
+
+## Retry semantics
+
+OpenMDM's webhook manager uses exponential backoff and a simple rule:
+
+- **2xx** → success, no retry.
+- **4xx except 429** → permanent failure, no retry. (If your receiver says "bad request," retrying won't fix it.)
+- **429** → retry with backoff.
+- **5xx** → retry with backoff.
+- **Network error or timeout (30s default)** → retry with backoff.
+
+With the default config, the delivery timeline for a 5xx loop is:
+
+```
+t=0s     attempt 1
+t=1s     attempt 2 (after 1s backoff)
+t=3s     attempt 3 (after 2s backoff)
+t=7s     attempt 4 (after 4s backoff)
+t=7s     give up, log failure
+```
+
+If your receiver needs more than three attempts, bump `retry.maxRetries` — but think about why. Usually a long retry tail means your receiver is overloaded, and more retries make it worse.
+
+## Dedup on the receiver
+
+Because retries are a real possibility, the receiver should treat `X-OpenMDM-Delivery` as an idempotency key:
+
+```typescript
+const delivery = req.header('X-OpenMDM-Delivery')!;
+
+if (await db.webhookDeliveries.hasSeen(delivery)) {
+  return res.status(200).send('already processed');
+}
+
+await db.transaction(async (tx) => {
+  await processPayload(payload, tx);
+  await tx.webhookDeliveries.mark(delivery);
+});
+```
+
+A retry of a successfully processed event returns 200 and does nothing. A retry of a failed event re-runs the work. This is the "at-least-once, exactly-once if you try" pattern that OpenMDM's webhook manager is built around.
+
+## Where to go next
+
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the event bus is also how you react to command state transitions.
+- **[Kiosk Recipe](/docs/recipes/kiosk)** — a recipe that pairs webhooks with the kiosk plugin to alert on kiosk-exit attempts.

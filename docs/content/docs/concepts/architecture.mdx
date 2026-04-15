@@ -1,0 +1,199 @@
+---
+title: Architecture
+description: How OpenMDM fits into your backend and how data flows between your server and devices.
+---
+
+# Architecture
+
+OpenMDM is shaped by one hard constraint: **it must run in the same process as your app and read/write the same database**. Every other design choice follows from that.
+
+This page is the map. If you want to understand *why* some API looks the way it does, start here.
+
+## The three boundaries
+
+Every MDM deployment has three components, and OpenMDM gives you exactly one of them:
+
+```
+┌─────────────────────┐      ┌─────────────────────┐      ┌─────────────────────┐
+│                     │      │                     │      │                     │
+│   Your backend      │◄────►│  Push infra         │◄────►│  Android device     │
+│   (Node / Hono)     │ HTTPS│  (FCM or MQTT)      │  FCM │  (openmdm-android)  │
+│                     │      │                     │      │                     │
+│   - Your routes     │      │  You pick one.      │      │  The agent APK you  │
+│   - OpenMDM SDK     │      │  Both are real      │      │  build with your    │
+│   - Your DB         │      │  production paths.  │      │  secrets compiled   │
+│                     │      │                     │      │  in.                │
+└─────────────────────┘      └─────────────────────┘      └─────────────────────┘
+        ▲                                                          ▲
+        │                                                          │
+        │                HTTPS requests from device                │
+        └──────────────────────────────────────────────────────────┘
+```
+
+- **Your backend** is the box OpenMDM lives in. You keep owning your DB, your auth, your observability.
+- **Push** is a separate service you run or rent. OpenMDM abstracts it behind a `PushAdapter` so swapping FCM for MQTT is a one-line config change.
+- **The Android agent** is a separate GitHub repo, [`openmdm-android`](https://github.com/openmdm/openmdm-android). You build it once with your enrollment secret compiled in, then distribute the APK through whatever mechanism you already use (zero-touch, MDM provisioning, sideload, etc.).
+
+OpenMDM does not run a server of its own. There is no `@openmdm/server` package. If you see that in an older doc, it's wrong.
+
+## The SDK shape
+
+A single `createMDM(config)` call returns an `MDMInstance`:
+
+```typescript
+const mdm = createMDM({
+  database: drizzleAdapter(db),   // how to persist
+  push: fcmPushAdapter({ ... }),  // how to wake devices
+  enrollment: { deviceSecret },   // how to validate enrollment
+  auth: { deviceTokenSecret },    // how to sign device JWTs
+  plugins: [kioskPlugin({ ... })],
+  webhooks: { endpoints: [...] },
+});
+```
+
+The instance exposes **managers** (`mdm.devices`, `mdm.policies`, `mdm.commands`, `mdm.apps`, `mdm.groups`), an **event bus** (`mdm.on`, `mdm.emit`), and a few **protocol entrypoints** (`mdm.enroll`, `mdm.processHeartbeat`, `mdm.verifyDeviceToken`). That's it. Everything else is either an adapter or a plugin.
+
+Adapters are the pluggable parts: `DatabaseAdapter`, `PushAdapter`, and the (optional) `StorageAdapter` for APK hosting. If you don't like Drizzle, write your own `DatabaseAdapter` and pass it in. If you want to send push through your own in-house broker, write a `PushAdapter`.
+
+## The three control flows
+
+### 1. Enrollment
+
+Enrollment is the one-time handshake where a device proves it's allowed to join the fleet and receives a long-lived token.
+
+```
+Device                              Your backend
+  │                                      │
+  │  POST /mdm/agent/enroll              │
+  │  { deviceInfo, method,               │
+  │    timestamp, signature }            │
+  ├─────────────────────────────────────►│
+  │                                      │
+  │                                      │  verifyEnrollmentSignature(req)
+  │                                      │  checks HMAC against DEVICE_SECRET
+  │                                      │
+  │                                      │  createDevice(...)
+  │                                      │  issueDeviceToken(...)
+  │                                      │
+  │  201 { deviceId, token }             │
+  │◄─────────────────────────────────────┤
+  │                                      │
+```
+
+The signature is an HMAC-SHA256 over a canonical pipe-delimited message. If the secret matches, the server writes a new row in `mdm_devices`, assigns the default policy (if any), and returns a device-scoped JWT. The agent persists that JWT and uses it on every subsequent request.
+
+`DEVICE_SECRET` lives in two places: your `.env` and the compiled Android APK. Rotating it means rebuilding the agent and redeploying both sides together.
+
+See [Enrollment](/docs/concepts/enrollment) for the canonical form and [Agent Wire Protocol](/docs/concepts/agent-protocol) for what happens when the signature fails.
+
+### 2. Heartbeat loop
+
+After enrollment, the device calls `/mdm/agent/heartbeat` on a schedule (default: every 60s, configurable per policy). Each heartbeat carries telemetry and returns the next batch of commands plus any policy update.
+
+```
+Device                              Your backend
+  │                                      │
+  │  POST /mdm/agent/heartbeat           │
+  │  Bearer <device token>               │
+  │  { battery, storage, apps,           │
+  │    location, security }              │
+  ├─────────────────────────────────────►│
+  │                                      │
+  │                                      │  deviceAuth middleware
+  │                                      │  processHeartbeat(id, body)
+  │                                      │    ├─ updates mdm_devices row
+  │                                      │    ├─ writes mdm_events
+  │                                      │    └─ fires 'device.heartbeat'
+  │                                      │
+  │                                      │  commands.getPending(id)
+  │                                      │  policies.get(device.policyId)
+  │                                      │
+  │  200 {                               │
+  │    pendingCommands: [...],           │
+  │    policyUpdate: { ... } | null      │
+  │  }                                   │
+  │◄─────────────────────────────────────┤
+```
+
+The heartbeat is **the only reliable way policies reach devices**. Push wakes the device up, but the actual policy and command delivery happens on the next heartbeat. This matters when you're debugging why a freshly assigned policy hasn't taken effect — it will, on the next heartbeat.
+
+### 3. Command delivery
+
+When your app calls `mdm.devices.sendCommand()`, three things happen:
+
+```
+Your app                     Server                     Push infra              Device
+  │                              │                          │                      │
+  │ sendCommand(id, {type,…})    │                          │                      │
+  ├─────────────────────────────►│                          │                      │
+  │                              │  INSERT INTO              │                      │
+  │                              │  mdm_commands             │                      │
+  │                              │  (status='pending')       │                      │
+  │                              │                          │                      │
+  │                              │  push.send(id, {         │                      │
+  │                              │    type: 'command.sync'  │                      │
+  │                              │  })                      │                      │
+  │                              ├─────────────────────────►│                      │
+  │                              │                          │   FCM data message   │
+  │                              │                          ├─────────────────────►│
+  │                              │  UPDATE mdm_commands      │                      │
+  │                              │  SET status='sent'        │                      │
+  │  Command { id, status='sent'}│                          │                      │
+  │◄─────────────────────────────┤                          │                      │
+  │                              │                          │                      │
+  │                              │◄─────────────────────────┼──────────────────────┤
+  │                              │       POST /mdm/agent/heartbeat                  │
+  │                              │       (triggered by push)                        │
+  │                              │                                                  │
+  │                              │  response includes                               │
+  │                              │  pendingCommands: [{…}]                          │
+  │                              │                                                  │
+  │                              │◄─────────────────────────┼──────────────────────┤
+  │                              │       POST /mdm/agent/commands/:id/ack           │
+  │                              │                                                  │
+  │                              │  UPDATE mdm_commands SET status='acknowledged'   │
+  │                              │                                                  │
+  │                              │◄─────────────────────────┼──────────────────────┤
+  │                              │       POST /mdm/agent/commands/:id/complete      │
+  │                              │                                                  │
+  │                              │  UPDATE mdm_commands SET status='completed'      │
+```
+
+The command moves through `pending → sent → acknowledged → completed` (or `failed`). The push notification is a wake-up hint, not the command itself; the command body is always pulled by the device on the heartbeat.
+
+This is "MDM is pull *and* push, not just push" — and it's why the SDK has no concept of a persistent open connection from the server to the device. The DB row is the source of truth; push is best-effort delivery of a wake-up.
+
+## Why the heartbeat is pulled, not pushed
+
+If you're coming from a web background, you might expect something like WebSockets. The reason MDM doesn't work that way:
+
+- Android aggressively kills long-lived network connections to save battery. A "persistent" socket lasts minutes, not days.
+- Carrier NAT timeouts are in the same ballpark.
+- Android Enterprise expects agents to be silent most of the time and only work on demand — persistent connections would burn battery and set off battery-optimization heuristics.
+- FCM is already the official "wake up this app in the background" primitive.
+
+Pull-with-push-wakeup is the only pattern that survives contact with real fleets. OpenMDM doesn't try to fight it.
+
+## What you own vs what OpenMDM owns
+
+| Concern | You | OpenMDM |
+|---|---|---|
+| HTTP server, TLS, reverse proxy | ✅ | — |
+| Admin authentication (who can call `mdm.devices.list`) | ✅ | — |
+| Database schema + migrations | ✅ via drizzle-kit | schema definition only |
+| Device enrollment + token issuance | — | ✅ |
+| Heartbeat processing | — | ✅ |
+| Command queue + state machine | — | ✅ |
+| Policy storage + delivery | — | ✅ |
+| Push delivery | — | ✅ via adapter |
+| Webhook signing + retry | — | ✅ |
+| Business logic that reacts to device events | ✅ via event handlers | — |
+| APK hosting | ✅ or S3 adapter | adapter only |
+
+The short version: OpenMDM owns the MDM protocol. You own everything that makes your app *your app*.
+
+## Where to go next
+
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the distinction that's nonobvious from the API.
+- **[Enrollment](/docs/concepts/enrollment)** — the canonical signing form and why there are two secrets.
+- **[Agent Wire Protocol](/docs/concepts/agent-protocol)** — the v1/v2 envelope and why it exists.
