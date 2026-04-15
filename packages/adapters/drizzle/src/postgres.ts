@@ -475,6 +475,39 @@ export const mdmEventsRelations = relations(mdmEvents, ({ one }) => ({
   }),
 }));
 
+// ============================================
+// Plugin Storage Table
+// ============================================
+//
+// Generic key-value store scoped by plugin name. Plugins use this to
+// persist state that must survive process restarts and work across
+// horizontally-scaled instances (the kiosk plugin's lockout counters
+// are the canonical example).
+//
+// The JSONB `value` column is intentionally schemaless — each plugin
+// owns the shape of its own values. Consumers should treat writes as
+// last-write-wins; if you need ordering guarantees, do it in the
+// plugin above this table.
+
+export const mdmPluginStorage = pgTable(
+  'mdm_plugin_storage',
+  {
+    pluginName: varchar('plugin_name', { length: 100 }).notNull(),
+    key: varchar('key', { length: 255 }).notNull(),
+    value: json('value').notNull().$type<unknown>(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.pluginName, table.key] }),
+    index('mdm_plugin_storage_plugin_idx').on(table.pluginName),
+  ]
+);
+
 export const mdmGroupsRelations = relations(mdmGroups, ({ one, many }) => ({
   policy: one(mdmPolicies, {
     fields: [mdmGroups.policyId],
@@ -565,6 +598,7 @@ export const mdmSchema = {
   mdmAppDeployments,
   mdmAppVersions,
   mdmRollbacks,
+  mdmPluginStorage,
   // Enums
   deviceStatusEnum,
   commandStatusEnum,

@@ -4,7 +4,7 @@
 > It is generated from the MDX sources at docs/content/docs. Paste it into
 > an LLM context window to ask questions without fetching pages individually.
 
-> Generated: 2026-04-15T12:43:11.763Z
+> Generated: 2026-04-15T14:27:36.391Z
 
 ---
 
@@ -727,15 +727,32 @@ Create one file — convention is `src/mdm.ts` — that exports a single configu
 ```typescript title="src/mdm.ts"
 import { createMDM } from '@openmdm/core';
 import { drizzleAdapter } from '@openmdm/drizzle-adapter';
+import { mdmSchema } from '@openmdm/drizzle-adapter/postgres';
 import { fcmPushAdapter } from '@openmdm/push-fcm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
 const client = postgres(process.env.DATABASE_URL!);
-const db = drizzle(client);
+const db = drizzle(client, { schema: mdmSchema });
 
 export const mdm = createMDM({
-  database: drizzleAdapter(db),
+  database: drizzleAdapter(db, {
+    tables: {
+      devices: mdmSchema.mdmDevices,
+      policies: mdmSchema.mdmPolicies,
+      applications: mdmSchema.mdmApplications,
+      commands: mdmSchema.mdmCommands,
+      events: mdmSchema.mdmEvents,
+      groups: mdmSchema.mdmGroups,
+      deviceGroups: mdmSchema.mdmDeviceGroups,
+      pushTokens: mdmSchema.mdmPushTokens,
+      appVersions: mdmSchema.mdmAppVersions,
+      rollbacks: mdmSchema.mdmRollbacks,
+      // Required for plugins that need cross-instance persistence
+      // (the kiosk plugin's lockout counters are the main example).
+      pluginStorage: mdmSchema.mdmPluginStorage,
+    },
+  }),
 
   push: fcmPushAdapter({
     credentialPath: './firebase-service-account.json',
@@ -756,6 +773,13 @@ export const mdm = createMDM({
     // Secret used to sign device-facing JWTs after enrollment.
     deviceTokenSecret: process.env.JWT_SECRET!,
   },
+
+  // Persist plugin state through the database adapter. Required for
+  // plugins that track stateful per-device data (kiosk lockout
+  // counters, geofence zone dwell, etc.). Without this, plugins fall
+  // back to in-memory state that is lost on restart and silently
+  // breaks horizontal scaling.
+  pluginStorage: { adapter: 'database' },
 
   serverUrl: process.env.SERVER_URL, // e.g. "https://mdm.example.com"
 });
@@ -1143,17 +1167,23 @@ This recipe covers the full lifecycle: enabling kiosk via policy, handling exit 
 
 ## Enable the plugin
 
-Kiosk is shipped as an optional plugin. Add it to your `createMDM` config:
+Kiosk is shipped as an optional plugin. Add it to your `createMDM` config **and enable `pluginStorage`** so lockout state survives restarts and scales horizontally:
 
 ```typescript title="src/mdm.ts"
 import { createMDM } from '@openmdm/core';
 import { kioskPlugin } from '@openmdm/plugin-kiosk';
 
 export const mdm = createMDM({
-  database: drizzleAdapter(db),
+  database: drizzleAdapter(db, { tables: mdmSchema }),
   push: fcmPushAdapter({ ... }),
   enrollment: { deviceSecret: process.env.DEVICE_SECRET! },
   auth: { deviceTokenSecret: process.env.JWT_SECRET! },
+
+  // REQUIRED for kiosk in production. The kiosk plugin persists
+  // lockout counters, the active kiosk app, and exit-attempt history
+  // through this store. If it's omitted, state lives only in this
+  // process's memory and is lost on restart or across replicas.
+  pluginStorage: { adapter: 'database' },
 
   plugins: [
     kioskPlugin({
@@ -1180,6 +1210,8 @@ export const mdm = createMDM({
 ```
 
 Plugins register routes, hooks, and state tracking at instance creation. Once the plugin is loaded, it wires itself into the policy application flow automatically — you don't need to import anything else to use it.
+
+> **Why pluginStorage is required in production.** Without it, the kiosk plugin falls back to an in-memory `Map` and prints a startup warning. That fallback is fine for local development, but it silently breaks two things you care about: (1) process restarts lose the lockout timer, so a malicious user who hit the max exit attempts gets a fresh budget every time your server redeploys, and (2) running a second replica behind a load balancer means each replica has its own view of the counters, so exit attempts aren't consistently counted. Both are real bugs that have bitten production fleets. Enabling `pluginStorage: { adapter: 'database' }` persists state through the same `DatabaseAdapter` you already configured.
 
 ## Create a kiosk policy
 

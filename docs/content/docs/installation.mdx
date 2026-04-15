@@ -64,15 +64,32 @@ Create one file — convention is `src/mdm.ts` — that exports a single configu
 ```typescript title="src/mdm.ts"
 import { createMDM } from '@openmdm/core';
 import { drizzleAdapter } from '@openmdm/drizzle-adapter';
+import { mdmSchema } from '@openmdm/drizzle-adapter/postgres';
 import { fcmPushAdapter } from '@openmdm/push-fcm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
 const client = postgres(process.env.DATABASE_URL!);
-const db = drizzle(client);
+const db = drizzle(client, { schema: mdmSchema });
 
 export const mdm = createMDM({
-  database: drizzleAdapter(db),
+  database: drizzleAdapter(db, {
+    tables: {
+      devices: mdmSchema.mdmDevices,
+      policies: mdmSchema.mdmPolicies,
+      applications: mdmSchema.mdmApplications,
+      commands: mdmSchema.mdmCommands,
+      events: mdmSchema.mdmEvents,
+      groups: mdmSchema.mdmGroups,
+      deviceGroups: mdmSchema.mdmDeviceGroups,
+      pushTokens: mdmSchema.mdmPushTokens,
+      appVersions: mdmSchema.mdmAppVersions,
+      rollbacks: mdmSchema.mdmRollbacks,
+      // Required for plugins that need cross-instance persistence
+      // (the kiosk plugin's lockout counters are the main example).
+      pluginStorage: mdmSchema.mdmPluginStorage,
+    },
+  }),
 
   push: fcmPushAdapter({
     credentialPath: './firebase-service-account.json',
@@ -93,6 +110,13 @@ export const mdm = createMDM({
     // Secret used to sign device-facing JWTs after enrollment.
     deviceTokenSecret: process.env.JWT_SECRET!,
   },
+
+  // Persist plugin state through the database adapter. Required for
+  // plugins that track stateful per-device data (kiosk lockout
+  // counters, geofence zone dwell, etc.). Without this, plugins fall
+  // back to in-memory state that is lost on restart and silently
+  // breaks horizontal scaling.
+  pluginStorage: { adapter: 'database' },
 
   serverUrl: process.env.SERVER_URL, // e.g. "https://mdm.example.com"
 });
