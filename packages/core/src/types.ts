@@ -32,6 +32,23 @@ export interface Device {
   lastHeartbeat?: Date | null;
   lastSync?: Date | null;
 
+  // Device identity (Phase 2b — device-pinned ECDSA P-256 key)
+  /**
+   * Base64-encoded SPKI public key the device registered on first
+   * enrollment. Requests from this device can be verified against
+   * this key via `verifyDeviceRequest` / `verifyEcdsaSignature` from
+   * `@openmdm/core`. `null` on devices that enrolled via the legacy
+   * HMAC path and have never been migrated.
+   */
+  publicKey?: string | null;
+  /**
+   * How the device originally enrolled. `'hmac'` for the legacy
+   * shared-secret path; `'pinned-key'` for the device-pinned ECDSA
+   * path. `null` on pre-Phase-2b device rows that predate the
+   * column (treated as `'hmac'`).
+   */
+  enrollmentMethod?: 'hmac' | 'pinned-key' | null;
+
   // Telemetry
   batteryLevel?: number | null;
   storageUsed?: number | null;
@@ -94,6 +111,10 @@ export interface UpdateDeviceInput {
   location?: DeviceLocation;
   tags?: Record<string, string>;
   metadata?: Record<string, unknown>;
+  /** Phase 2b — pin a new public key on first enroll. */
+  publicKey?: string | null;
+  /** Phase 2b — record which auth path the device enrolled via. */
+  enrollmentMethod?: 'hmac' | 'pinned-key' | null;
 }
 
 export interface DeviceFilter {
@@ -532,7 +553,44 @@ export interface EnrollmentRequest {
   // Enrollment details
   method: EnrollmentMethod;
   timestamp: string;
+
+  /**
+   * Signature over the canonical enrollment message.
+   *
+   * Phase 2a (HMAC path, backwards-compatible): hex-encoded
+   * HMAC-SHA256 of the nine-field pipe-delimited canonical form
+   * (see `concepts/enrollment`).
+   *
+   * Phase 2b (device-pinned-key path, preferred): base64-encoded
+   * DER ECDSA-P256 signature produced by the device's Keystore
+   * private key, over `canonicalEnrollmentMessage(...)` including
+   * the public key and challenge. The server distinguishes the
+   * two paths by whether `publicKey` is present on the request.
+   */
   signature: string;
+
+  /**
+   * Base64-encoded SPKI public key (EC P-256) the device generated
+   * in its Keystore. When present, enrollment follows the Phase 2b
+   * device-pinned-key path and `signature` must verify as an ECDSA
+   * signature against this key. The server pins this key on the
+   * device row on first successful enroll; any future enroll
+   * attempting a different key for the same `enrollmentId` is
+   * rejected with `PublicKeyMismatchError`.
+   *
+   * Omit for the legacy HMAC path. Callers that want to migrate a
+   * fleet gradually can run both paths in parallel.
+   */
+  publicKey?: string;
+
+  /**
+   * Opaque challenge issued by `GET /agent/enroll/challenge`. Must
+   * be present whenever `publicKey` is present — the server uses
+   * it to prevent replay of captured enrollment payloads. The
+   * challenge is single-use: the server consumes it on first
+   * successful verify.
+   */
+  attestationChallenge?: string;
 
   // Optional pre-assigned policy/group
   policyId?: string;
@@ -550,6 +608,43 @@ export interface EnrollmentResponse {
   refreshToken?: string;
   tokenExpiresAt?: Date;
 }
+
+// ============================================
+// Device Identity (Phase 2b)
+// ============================================
+
+/**
+ * Single-use nonce issued by `GET /agent/enroll/challenge` and
+ * consumed on first successful verify of a device-pinned-key
+ * enrollment. A persisted record; the `consume*` adapter methods
+ * enforce the single-use invariant.
+ */
+export interface EnrollmentChallenge {
+  challenge: string;
+  expiresAt: Date;
+  consumedAt?: Date | null;
+  createdAt: Date;
+}
+
+/**
+ * Result of calling `verifyDeviceRequest`. Callers pattern-match on
+ * `ok` and, when `false`, on `reason` to decide their response
+ * shape:
+ *
+ *  - `not-found`         — unknown device id. Return 401.
+ *  - `no-pinned-key`     — device exists but never migrated off the
+ *                          legacy HMAC path. Caller should fall back
+ *                          to their HMAC verifier, or fail if
+ *                          they've completed their migration.
+ *  - `signature-invalid` — signature did not verify against the
+ *                          pinned key. Return 401. Never re-pin
+ *                          in response to this.
+ */
+export type DeviceIdentityVerification =
+  | { ok: true; device: Device }
+  | { ok: false; reason: 'not-found' }
+  | { ok: false; reason: 'no-pinned-key'; device: Device }
+  | { ok: false; reason: 'signature-invalid'; device: Device };
 
 export interface PushConfig {
   provider: 'fcm' | 'mqtt' | 'websocket' | 'polling';
@@ -844,7 +939,7 @@ export interface PushProviderConfig {
 export interface EnrollmentConfig {
   /** Auto-enroll devices with valid signature */
   autoEnroll?: boolean;
-  /** HMAC secret for device signature verification */
+  /** HMAC secret for device signature verification (Phase 2a path) */
   deviceSecret: string;
   /** Allowed enrollment methods */
   allowedMethods?: EnrollmentMethod[];
@@ -856,6 +951,35 @@ export interface EnrollmentConfig {
   requireApproval?: boolean;
   /** Custom enrollment validation */
   validate?: (request: EnrollmentRequest) => Promise<boolean>;
+
+  /**
+   * Phase 2b device-pinned-key configuration. Optional — when
+   * omitted, enrollment continues to accept the Phase 2a HMAC path
+   * exclusively, matching pre-0.9 behaviour.
+   */
+  pinnedKey?: PinnedKeyConfig;
+}
+
+/**
+ * Device-pinned-key enrollment options. See
+ * `docs/concepts/enrollment` for the full flow.
+ */
+export interface PinnedKeyConfig {
+  /**
+   * Require every new enrollment to use the pinned-key path. When
+   * `true`, requests without `publicKey` are rejected. When `false`
+   * (the default), both paths coexist during rollout — the server
+   * pins a public key when one is provided, falls back to HMAC when
+   * it isn't.
+   */
+  required?: boolean;
+
+  /**
+   * TTL for enrollment challenges, in seconds. Defaults to 300
+   * (5 minutes). Challenges are single-use; this only bounds how
+   * long an unused challenge stays valid.
+   */
+  challengeTtlSeconds?: number;
 }
 
 // ============================================
@@ -934,6 +1058,36 @@ export interface DatabaseAdapter {
   getGroupEffectivePolicy?(groupId: string): Promise<Policy | null>;
   moveGroup?(groupId: string, newParentId: string | null): Promise<Group>;
   getGroupHierarchyStats?(): Promise<GroupHierarchyStats>;
+
+  // Enrollment challenges (optional - for Phase 2b device-pinned-key)
+  /**
+   * Persist a new single-use enrollment challenge. The adapter
+   * should store it with `consumed_at = null` and enforce a
+   * primary-key constraint on `challenge` so duplicate inserts
+   * fail loudly.
+   */
+  createEnrollmentChallenge?(challenge: EnrollmentChallenge): Promise<void>;
+  /**
+   * Look up a challenge by its opaque value. Returns `null` if not
+   * found. Does NOT filter on expiry — the core layer checks
+   * freshness so the adapter stays dumb.
+   */
+  findEnrollmentChallenge?(challenge: string): Promise<EnrollmentChallenge | null>;
+  /**
+   * Atomically mark a challenge as consumed. Must set
+   * `consumed_at = now()` and return the updated row only when the
+   * challenge was previously unused. Adapters should implement
+   * this as a conditional UPDATE (e.g. Postgres
+   * `UPDATE ... WHERE consumed_at IS NULL RETURNING *`) so two
+   * concurrent consume attempts cannot both succeed.
+   */
+  consumeEnrollmentChallenge?(challenge: string): Promise<EnrollmentChallenge | null>;
+  /**
+   * Delete expired, unconsumed challenges. Called periodically by
+   * the core layer; adapters can no-op if they rely on a TTL index
+   * elsewhere.
+   */
+  pruneExpiredEnrollmentChallenges?(now: Date): Promise<number>;
 
   // Tenants (optional - for multi-tenancy)
   findTenant?(id: string): Promise<Tenant | null>;

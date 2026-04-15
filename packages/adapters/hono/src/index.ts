@@ -326,6 +326,57 @@ export function honoAdapter(
   if (routes.enrollment) {
     const enrollment = new Hono<MDMEnv>();
 
+    // Issue a single-use enrollment challenge for the Phase 2b
+    // device-pinned-key path. Unauthenticated by design — the
+    // agent has no credentials yet at this point in the flow,
+    // and the challenge is only useful when combined with a
+    // valid ECDSA signature over the canonical enrollment message
+    // that cannot be produced without the freshly-generated
+    // private key inside the device's Keystore.
+    //
+    // The route 503s when the underlying adapter does not
+    // implement challenge storage, rather than silently returning
+    // a challenge the device will later fail to redeem.
+    enrollment.get('/enroll/challenge', async (c) => {
+      if (
+        !mdm.db.createEnrollmentChallenge ||
+        !mdm.db.consumeEnrollmentChallenge
+      ) {
+        throw new HTTPException(503, {
+          message:
+            'Enrollment challenges are not supported by this database adapter. ' +
+            'Upgrade to an adapter that implements createEnrollmentChallenge ' +
+            'and consumeEnrollmentChallenge, or use the HMAC enrollment path.',
+        });
+      }
+
+      const ttlSeconds =
+        mdm.config.enrollment?.pinnedKey?.challengeTtlSeconds ?? 300;
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+
+      // 32 bytes of entropy base64-encoded → ~43 chars. Enough to
+      // make collisions astronomically improbable and enough that
+      // the server does not need to rate-limit this endpoint at
+      // the application layer (though a reverse proxy should).
+      const challengeBytes = new Uint8Array(32);
+      crypto.getRandomValues(challengeBytes);
+      const challenge = Buffer.from(challengeBytes).toString('base64');
+
+      await mdm.db.createEnrollmentChallenge({
+        challenge,
+        expiresAt,
+        consumedAt: null,
+        createdAt: now,
+      });
+
+      return c.json({
+        challenge,
+        expiresAt: expiresAt.toISOString(),
+        ttlSeconds,
+      });
+    });
+
     // Enroll device
     enrollment.post('/enroll', async (c) => {
       const body = await c.req.json<EnrollmentRequest>();

@@ -102,6 +102,14 @@ export const mdmDevices = pgTable(
     lastHeartbeat: timestamp('last_heartbeat', { withTimezone: true }),
     lastSync: timestamp('last_sync', { withTimezone: true }),
 
+    // Device identity (Phase 2b — device-pinned-key enrollment).
+    // publicKey is the base64-encoded SPKI EC P-256 public key the
+    // device registered on first enrollment. TEXT rather than BYTEA
+    // because we always work with the base64 on the wire and
+    // comparing base64 strings is cheaper than re-encoding.
+    publicKey: text('public_key'),
+    enrollmentMethod: varchar('enrollment_method', { length: 20 }),
+
     // Telemetry
     batteryLevel: integer('battery_level'),
     storageUsed: bigint('storage_used', { mode: 'number' }),
@@ -508,6 +516,33 @@ export const mdmPluginStorage = pgTable(
   ]
 );
 
+// ============================================
+// Enrollment Challenges Table (Phase 2b)
+// ============================================
+//
+// Single-use nonces issued by the challenge endpoint and consumed
+// by the device-pinned-key enrollment path. The atomic consume is
+// the critical property — two concurrent enroll attempts with the
+// same challenge must not both succeed. That's enforced in the
+// adapter via a conditional `UPDATE ... WHERE consumed_at IS NULL
+// RETURNING *`.
+//
+// Expired, unconsumed rows are pruned periodically via
+// `pruneExpiredEnrollmentChallenges`; we don't rely on a TTL index.
+
+export const mdmEnrollmentChallenges = pgTable(
+  'mdm_enrollment_challenges',
+  {
+    challenge: varchar('challenge', { length: 255 }).primaryKey(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index('mdm_enrollment_challenges_expires_at_idx').on(table.expiresAt)]
+);
+
 export const mdmGroupsRelations = relations(mdmGroups, ({ one, many }) => ({
   policy: one(mdmPolicies, {
     fields: [mdmGroups.policyId],
@@ -599,6 +634,7 @@ export const mdmSchema = {
   mdmAppVersions,
   mdmRollbacks,
   mdmPluginStorage,
+  mdmEnrollmentChallenges,
   // Enums
   deviceStatusEnum,
   commandStatusEnum,

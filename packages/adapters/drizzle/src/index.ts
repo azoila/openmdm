@@ -20,7 +20,7 @@
  * ```
  */
 
-import { eq, and, or, like, inArray, desc, sql, isNull, type SQL } from 'drizzle-orm';
+import { eq, and, or, like, inArray, desc, sql, isNull, lt, type SQL } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type {
   DatabaseAdapter,
@@ -51,6 +51,7 @@ import type {
   AppVersion,
   AppRollback,
   CreateAppRollbackInput,
+  EnrollmentChallenge,
 } from '@openmdm/core';
 
 // Import postgres schema types
@@ -66,6 +67,7 @@ import type {
   mdmAppVersions,
   mdmRollbacks,
   mdmPluginStorage,
+  mdmEnrollmentChallenges,
 } from './postgres';
 
 // Type for Drizzle database instance
@@ -94,6 +96,12 @@ export interface DrizzleAdapterOptions {
     appVersions?: typeof mdmAppVersions;
     rollbacks?: typeof mdmRollbacks;
     pluginStorage?: typeof mdmPluginStorage;
+    /**
+     * Phase 2b enrollment challenges table. Required for
+     * device-pinned-key enrollment. Omit to run enrollment in
+     * legacy HMAC-only mode.
+     */
+    enrollmentChallenges?: typeof mdmEnrollmentChallenges;
   };
 }
 
@@ -117,6 +125,7 @@ export function drizzleAdapter(
     appVersions,
     rollbacks,
     pluginStorage,
+    enrollmentChallenges,
   } = tables;
 
   // Helper to generate IDs
@@ -139,6 +148,8 @@ export function drizzleAdapter(
     agentVersion: row.agentVersion as string | null,
     lastHeartbeat: row.lastHeartbeat as Date | null,
     lastSync: row.lastSync as Date | null,
+    publicKey: (row.publicKey as string | null) ?? null,
+    enrollmentMethod: (row.enrollmentMethod as Device['enrollmentMethod']) ?? null,
     batteryLevel: row.batteryLevel as number | null,
     storageUsed: row.storageUsed as number | null,
     storageTotal: row.storageTotal as number | null,
@@ -405,6 +416,9 @@ export function drizzleAdapter(
         updateData.installedApps = data.installedApps;
       if (data.tags !== undefined) updateData.tags = data.tags;
       if (data.metadata !== undefined) updateData.metadata = data.metadata;
+      if (data.publicKey !== undefined) updateData.publicKey = data.publicKey;
+      if (data.enrollmentMethod !== undefined)
+        updateData.enrollmentMethod = data.enrollmentMethod;
 
       if (data.location) {
         updateData.latitude = data.location.latitude.toString();
@@ -1228,6 +1242,90 @@ export function drizzleAdapter(
             await (db as any)
               .delete(pluginStorage)
               .where(eq(pluginStorage.pluginName, pluginName));
+          },
+        }
+      : {}),
+
+    // ============================================
+    // Enrollment Challenges (Phase 2b)
+    // ============================================
+    //
+    // Only wired when the caller passes `enrollmentChallenges`.
+    // The atomic consume is implemented as a conditional UPDATE
+    // WHERE consumed_at IS NULL RETURNING *, which both guarantees
+    // single-use semantics and returns the row only when the
+    // transition actually happened.
+
+    ...(enrollmentChallenges
+      ? {
+          async createEnrollmentChallenge(
+            challenge: EnrollmentChallenge
+          ): Promise<void> {
+            await (db as any).insert(enrollmentChallenges).values({
+              challenge: challenge.challenge,
+              expiresAt: challenge.expiresAt,
+              consumedAt: challenge.consumedAt ?? null,
+              createdAt: challenge.createdAt,
+            });
+          },
+
+          async findEnrollmentChallenge(
+            challenge: string
+          ): Promise<EnrollmentChallenge | null> {
+            const rows = await (db as any)
+              .select()
+              .from(enrollmentChallenges)
+              .where(eq(enrollmentChallenges.challenge, challenge))
+              .limit(1);
+            if (rows.length === 0) return null;
+            const row = rows[0];
+            return {
+              challenge: row.challenge,
+              expiresAt: row.expiresAt,
+              consumedAt: row.consumedAt ?? null,
+              createdAt: row.createdAt,
+            };
+          },
+
+          async consumeEnrollmentChallenge(
+            challenge: string
+          ): Promise<EnrollmentChallenge | null> {
+            // Conditional UPDATE: the RETURNING clause gives us the
+            // row only if the WHERE matched a previously-unused
+            // challenge. Two concurrent calls can't both succeed
+            // because the second one sees consumed_at IS NOT NULL
+            // and no row matches.
+            const rows = await (db as any)
+              .update(enrollmentChallenges)
+              .set({ consumedAt: new Date() })
+              .where(
+                and(
+                  eq(enrollmentChallenges.challenge, challenge),
+                  isNull(enrollmentChallenges.consumedAt)
+                )
+              )
+              .returning();
+            if (rows.length === 0) return null;
+            const row = rows[0];
+            return {
+              challenge: row.challenge,
+              expiresAt: row.expiresAt,
+              consumedAt: row.consumedAt,
+              createdAt: row.createdAt,
+            };
+          },
+
+          async pruneExpiredEnrollmentChallenges(now: Date): Promise<number> {
+            const rows = await (db as any)
+              .delete(enrollmentChallenges)
+              .where(
+                and(
+                  lt(enrollmentChallenges.expiresAt, now),
+                  isNull(enrollmentChallenges.consumedAt)
+                )
+              )
+              .returning({ challenge: enrollmentChallenges.challenge });
+            return rows.length;
           },
         }
       : {}),
