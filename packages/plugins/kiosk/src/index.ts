@@ -668,21 +668,26 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
 
     async onInit(instance: MDMInstance): Promise<void> {
       mdm = instance;
+      const log = instance.logger.child({ component: 'plugin-kiosk' });
       if (!instance.pluginStorage) {
-        console.warn(
-          '[OpenMDM Kiosk] pluginStorage is not configured on createMDM. ' +
-            'Kiosk lockout state will live in this process only and will be ' +
-            'lost on restart or across replicas. This is only safe for local ' +
-            'development. See docs/concepts/architecture for the production ' +
-            'setup.',
+        log.warn(
+          {
+            reason: 'pluginStorage-not-configured',
+            fallback: 'in-memory',
+          },
+          'Kiosk lockout state will be lost on restart and across replicas. ' +
+            'Pass pluginStorage: { adapter: "database" } to createMDM for ' +
+            'production setups. See docs/concepts/architecture.',
         );
       }
-      console.log('[OpenMDM Kiosk] Plugin initialized');
+      log.info('Plugin initialized');
     },
 
     async onDestroy(): Promise<void> {
       inMemoryFallback.clear();
-      console.log('[OpenMDM Kiosk] Plugin destroyed');
+      mdm?.logger
+        .child({ component: 'plugin-kiosk' })
+        .info('Plugin destroyed');
     },
 
     routes,

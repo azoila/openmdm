@@ -126,7 +126,17 @@ export function honoAdapter(
       return options.onError(error, c);
     }
 
-    console.error('[OpenMDM] Error:', error);
+    mdm.logger
+      .child({ component: 'hono' })
+      .error(
+        {
+          err: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          path: c.req.path,
+          method: c.req.method,
+        },
+        'Unhandled error in hono adapter',
+      );
 
     if (error instanceof HTTPException) {
       return c.json({ error: error.message }, error.status);
@@ -206,6 +216,64 @@ export function honoAdapter(
     c.set('user', user);
     await next();
   };
+
+  // ============================================
+  // Health Endpoints
+  // ============================================
+  //
+  // /healthz is a liveness probe: returns 200 iff the process is
+  // alive and able to serve HTTP. It does NOT touch the database or
+  // the push adapter — if those are degraded, the process is still
+  // alive and should not be killed by the orchestrator.
+  //
+  // /readyz is a readiness probe: returns 200 iff the process can
+  // actually do work, meaning the database round-trip succeeds. If
+  // readyz fails, the orchestrator should stop routing traffic
+  // here but should NOT restart the pod.
+  //
+  // The two endpoints are unauthenticated so load balancers and
+  // k8s probes can hit them without credentials. They expose no
+  // information an attacker could use beyond "server alive" /
+  // "database reachable", which is standard for health probes.
+
+  app.get('/healthz', (c) => {
+    return c.json({ status: 'ok' }, 200);
+  });
+
+  app.get('/readyz', async (c) => {
+    const checks: Record<string, { ok: boolean; error?: string }> = {};
+    let overall = true;
+
+    // Database check: cheap round-trip through the adapter. A listing
+    // with limit=1 hits SELECT without a table scan and proves the
+    // pool is live.
+    try {
+      await mdm.db.listDevices({ limit: 1, offset: 0 });
+      checks.database = { ok: true };
+    } catch (err) {
+      checks.database = {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+      overall = false;
+    }
+
+    // Push adapter check is best-effort. Most push adapters don't
+    // expose a cheap probe (calling FCM on every readyz hit would
+    // rate-limit us fast), so we only confirm the adapter is
+    // present. A real health probe would come from the adapter
+    // exposing its own `.health()` method — that is out of scope
+    // for this PR and tracked as a follow-up.
+    checks.push = { ok: Boolean(mdm.push) };
+    if (!checks.push.ok) {
+      overall = false;
+    }
+
+    return c.json(
+      { status: overall ? 'ok' : 'degraded', checks },
+      overall ? 200 : 503,
+    );
+  });
 
   // ============================================
   // Enrollment Routes (Device-facing)

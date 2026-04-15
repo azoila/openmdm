@@ -73,6 +73,7 @@ import type {
   PluginStorageAdapter,
   GroupTreeNode,
   GroupHierarchyStats,
+  Logger,
 } from './types';
 import {
   DeviceNotFoundError,
@@ -88,6 +89,7 @@ import { createScheduleManager } from './schedule';
 import { createMessageQueueManager } from './queue';
 import { createDashboardManager } from './dashboard';
 import { createPluginStorageAdapter, createMemoryPluginStorageAdapter } from './plugin-storage';
+import { createConsoleLogger, createSilentLogger } from './logger';
 
 // Re-export all types
 export * from './types';
@@ -95,6 +97,7 @@ export * from './schema';
 export * from './agent-protocol';
 export { createWebhookManager, verifyWebhookSignature } from './webhooks';
 export type { WebhookPayload } from './webhooks';
+export { createConsoleLogger, createSilentLogger } from './logger';
 
 // Re-export enterprise manager factories
 export { createTenantManager } from './tenant';
@@ -111,17 +114,36 @@ export { createPluginStorageAdapter, createMemoryPluginStorageAdapter, createPlu
 export function createMDM(config: MDMConfig): MDMInstance {
   const { database, push, enrollment, webhooks: webhooksConfig, plugins = [] } = config;
 
+  // Structured logger. Falls back to the console-backed default if
+  // the host doesn't pass one. Host code is expected to pass a real
+  // pino/winston instance in production.
+  const logger = config.logger ?? createConsoleLogger();
+
+  // Extract a stable message from an unknown thrown value so it
+  // survives JSON serialization into the log context. Error objects
+  // stringify to `{}` otherwise, which is the #1 cause of "we can't
+  // tell why this failed" in production logs.
+  const errorMessage = (err: unknown): string => {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'string') return err;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  };
+
   // Event handlers registry
   const eventHandlers = new Map<EventType, Set<EventHandler<EventType>>>();
 
   // Create push adapter
   const pushAdapter: PushAdapter = push
-    ? createPushAdapter(push, database)
-    : createStubPushAdapter();
+    ? createPushAdapter(push, database, logger)
+    : createStubPushAdapter(logger);
 
   // Create webhook manager if configured
   const webhookManager: WebhookManager | undefined = webhooksConfig
-    ? createWebhookManager(webhooksConfig)
+    ? createWebhookManager(webhooksConfig, logger)
     : undefined;
 
   // ============================================
@@ -205,13 +227,16 @@ export function createMDM(config: MDMConfig): MDMInstance {
         payload: eventRecord.payload as Record<string, unknown>,
       });
     } catch (error) {
-      console.error('[OpenMDM] Failed to persist event:', error);
+      logger.error({ err: errorMessage(error), event }, 'Failed to persist event');
     }
 
     // Deliver webhooks (async, don't wait)
     if (webhookManager) {
       webhookManager.deliver(eventRecord).catch((error) => {
-        console.error('[OpenMDM] Webhook delivery error:', error);
+        logger.error(
+          { err: errorMessage(error), event },
+          'Webhook delivery error',
+        );
       });
     }
 
@@ -221,7 +246,10 @@ export function createMDM(config: MDMConfig): MDMInstance {
         try {
           await handler(eventRecord);
         } catch (error) {
-          console.error(`[OpenMDM] Event handler error for ${event}:`, error);
+          logger.error(
+            { err: errorMessage(error), event },
+            'Event handler threw',
+          );
         }
       }
     }
@@ -231,7 +259,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       try {
         await config.onEvent(eventRecord);
       } catch (error) {
-        console.error('[OpenMDM] onEvent hook error:', error);
+        logger.error({ err: errorMessage(error) }, 'onEvent hook threw');
       }
     }
   };
@@ -1193,6 +1221,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
     push: pushAdapter,
     webhooks: webhookManager,
     db: database,
+    logger,
     config,
     on,
     emit,
@@ -1217,11 +1246,11 @@ export function createMDM(config: MDMConfig): MDMInstance {
       if (plugin.onInit) {
         try {
           await plugin.onInit(instance);
-          console.log(`[OpenMDM] Plugin initialized: ${plugin.name}`);
+          logger.info({ plugin: plugin.name }, 'Plugin initialized');
         } catch (error) {
-          console.error(
-            `[OpenMDM] Failed to initialize plugin ${plugin.name}:`,
-            error
+          logger.error(
+            { plugin: plugin.name, err: errorMessage(error) },
+            'Failed to initialize plugin',
           );
         }
       }
@@ -1237,19 +1266,22 @@ export function createMDM(config: MDMConfig): MDMInstance {
 
 function createPushAdapter(
   config: MDMConfig['push'],
-  database: MDMConfig['database']
+  database: MDMConfig['database'],
+  logger: Logger,
 ): PushAdapter {
   if (!config) {
-    return createStubPushAdapter();
+    return createStubPushAdapter(logger);
   }
+
+  const pushLogger = logger.child({ component: 'push' });
 
   // The actual implementations will be provided by separate packages
   // This is a base implementation that logs and stores tokens
   return {
     async send(deviceId: string, message: PushMessage): Promise<PushResult> {
-      console.log(
-        `[OpenMDM] Push to ${deviceId}: ${message.type}`,
-        message.payload
+      pushLogger.debug(
+        { deviceId, type: message.type, payload: message.payload },
+        'send',
       );
 
       // In production, this would be replaced by FCM/MQTT adapter
@@ -1260,8 +1292,9 @@ function createPushAdapter(
       deviceIds: string[],
       message: PushMessage
     ): Promise<PushBatchResult> {
-      console.log(
-        `[OpenMDM] Push to ${deviceIds.length} devices: ${message.type}`
+      pushLogger.debug(
+        { count: deviceIds.length, type: message.type },
+        'sendBatch',
       );
 
       const results = deviceIds.map((deviceId) => ({
@@ -1298,10 +1331,11 @@ function createPushAdapter(
   };
 }
 
-function createStubPushAdapter(): PushAdapter {
+function createStubPushAdapter(logger: Logger): PushAdapter {
+  const stubLogger = logger.child({ component: 'push-stub' });
   return {
     async send(deviceId: string, message: PushMessage): Promise<PushResult> {
-      console.log(`[OpenMDM] Push (stub): ${deviceId} <- ${message.type}`);
+      stubLogger.debug({ deviceId, type: message.type }, 'send (stub)');
       return { success: true, messageId: 'stub' };
     },
 
@@ -1309,8 +1343,9 @@ function createStubPushAdapter(): PushAdapter {
       deviceIds: string[],
       message: PushMessage
     ): Promise<PushBatchResult> {
-      console.log(
-        `[OpenMDM] Push (stub): ${deviceIds.length} devices <- ${message.type}`
+      stubLogger.debug(
+        { count: deviceIds.length, type: message.type },
+        'sendBatch (stub)',
       );
       return {
         successCount: deviceIds.length,

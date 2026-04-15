@@ -4,6 +4,7 @@
     "architecture",
     "commands-and-policies",
     "enrollment",
-    "agent-protocol"
+    "agent-protocol",
+    "operations"
   ]
 }

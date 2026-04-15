@@ -694,7 +694,65 @@ export interface MDMConfig {
   pluginStorage?: {
     adapter: 'database' | 'memory';
   };
+
+  /**
+   * Structured logger. Replaces OpenMDM's internal `console.*` calls
+   * so log output lands in the host application's logging pipeline
+   * (pino, winston, bunyan, OTEL collector, etc.) instead of raw
+   * stderr.
+   *
+   * The shape is a strict subset of the pino / winston / bunyan
+   * interface — any of those can be passed directly. If omitted, a
+   * default logger that writes to the console with an `[openmdm]`
+   * prefix is used. To silence OpenMDM entirely, pass a no-op
+   * implementation (see `createSilentLogger()` in the package
+   * exports).
+   */
+  logger?: Logger;
 }
+
+/**
+ * Minimal structured-logger interface OpenMDM calls internally.
+ *
+ * The shape is deliberately the pino-compatible subset: an optional
+ * context object as the first argument followed by a message string.
+ * pino, winston, bunyan, and most other structured loggers accept
+ * this shape natively.
+ *
+ * Implementations should be side-effect-free on unconfigured levels
+ * (a production logger filtered to `info` should still accept
+ * `.debug()` calls cheaply).
+ */
+export interface Logger {
+  /** Human-ignorable, high-volume tracing. Off in production by default. */
+  debug(context: LogContext, message: string): void;
+  debug(message: string): void;
+
+  /** Normal operational events. Enrollment, policy changes, command delivery. */
+  info(context: LogContext, message: string): void;
+  info(message: string): void;
+
+  /** Something is wrong but the server is still running. Retries, fallbacks, degraded modes. */
+  warn(context: LogContext, message: string): void;
+  warn(message: string): void;
+
+  /** Something failed and a request/operation did not complete. */
+  error(context: LogContext, message: string): void;
+  error(message: string): void;
+
+  /**
+   * Return a new logger with the given fields attached to every
+   * subsequent call. Used by managers and plugins to scope logs to
+   * a specific subsystem without repeating context.
+   */
+  child(bindings: LogContext): Logger;
+}
+
+/**
+ * Arbitrary structured context attached to a log line. Values must
+ * be JSON-serializable so host loggers can ship them to any backend.
+ */
+export type LogContext = Record<string, unknown>;
 
 export interface StorageConfig {
   /** Storage provider (s3, local, custom) */
@@ -1099,6 +1157,9 @@ export interface MDMInstance {
 
   /** Database adapter */
   db: DatabaseAdapter;
+
+  /** Structured logger. Already scoped to the `openmdm` namespace. Plugins should call `.child({...})` to scope further. */
+  logger: Logger;
 
   /** Configuration */
   config: MDMConfig;

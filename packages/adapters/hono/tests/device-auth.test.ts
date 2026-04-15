@@ -49,6 +49,20 @@ function buildMockMDM(overrides: Partial<MDMInstance> = {}): MDMInstance {
     getDefault: vi.fn(async () => null),
   };
 
+  // Silent logger stand-in so the hono adapter's error handler can
+  // call `mdm.logger.child(...).error(...)` without crashing the
+  // test. We don't assert on log output here — the logger's own
+  // contract is covered by its unit tests in @openmdm/core.
+  const silentLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: function child() {
+      return silentLogger;
+    },
+  };
+
   return {
     devices,
     policies,
@@ -57,6 +71,7 @@ function buildMockMDM(overrides: Partial<MDMInstance> = {}): MDMInstance {
     groups: {},
     push: {},
     db: {},
+    logger: silentLogger,
     config: {},
     on: vi.fn(() => () => undefined),
     emit: vi.fn(async () => undefined),
