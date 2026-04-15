@@ -1,5 +1,12 @@
 # @openmdm/push-mqtt
 
+## 0.2.6
+
+### Patch Changes
+
+- Updated dependencies [[`00ed63f`](https://github.com/azoila/openmdm/commit/00ed63fd0be0259786cbbc29285e34f7ea77f0c0), [`8de33da`](https://github.com/azoila/openmdm/commit/8de33da48b8dd3650dfb4cc5d1d0d0f33ffe2434)]:
+  - @openmdm/core@0.9.0
+
 ## 0.2.5
 
 ### Patch Changes
