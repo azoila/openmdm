@@ -93,6 +93,9 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
     }
   }
 
+  if (!output) {
+    throw new Error('Output path is required');
+  }
   const outputPath = resolve(process.cwd(), output);
 
   // Confirm before overwriting

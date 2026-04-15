@@ -1,90 +1,66 @@
 import chalk from 'chalk';
 import ora from 'ora';
+import type { MDMInstance } from '@openmdm/core';
+import { withMDM } from '../config.js';
 
 interface StatsOptions {
   json?: boolean;
 }
 
-export async function showStats(options: StatsOptions): Promise<void> {
-  const spinner = ora('Fetching statistics...').start();
-
-  try {
-    // Mock statistics - in real implementation, this queries the database
-    const stats = {
-      devices: {
-        total: 85,
-        enrolled: 72,
-        pending: 8,
-        blocked: 5,
-        online: 45,
-        offline: 40,
-      },
-      policies: {
-        total: 5,
-        withDevices: 4,
-      },
-      commands: {
-        pending: 12,
-        completedToday: 156,
-        failedToday: 3,
-      },
-      system: {
-        uptime: '15 days, 4 hours',
-        version: '0.1.0',
-        lastBackup: new Date(Date.now() - 86400000).toISOString(),
-      },
-    };
-
-    spinner.stop();
-
-    if (options.json) {
-      console.log(JSON.stringify(stats, null, 2));
-      return;
-    }
-
-    console.log(chalk.blue('\\n📊 OpenMDM Statistics\\n'));
-
-    // Devices section
-    console.log(chalk.white.bold('  Devices'));
-    console.log(chalk.gray('  ─────────────────────'));
-    console.log(`  Total:    ${chalk.cyan(stats.devices.total)}`);
-    console.log(`  Enrolled: ${chalk.green(stats.devices.enrolled)}`);
-    console.log(`  Pending:  ${chalk.yellow(stats.devices.pending)}`);
-    console.log(`  Blocked:  ${chalk.red(stats.devices.blocked)}`);
-    console.log('');
-    console.log(`  Online:   ${chalk.green(stats.devices.online)}`);
-    console.log(`  Offline:  ${chalk.gray(stats.devices.offline)}`);
-    console.log('');
-
-    // Policies section
-    console.log(chalk.white.bold('  Policies'));
-    console.log(chalk.gray('  ─────────────────────'));
-    console.log(`  Total:        ${chalk.cyan(stats.policies.total)}`);
-    console.log(`  With devices: ${chalk.cyan(stats.policies.withDevices)}`);
-    console.log('');
-
-    // Commands section
-    console.log(chalk.white.bold('  Commands (Today)'));
-    console.log(chalk.gray('  ─────────────────────'));
-    console.log(`  Pending:   ${chalk.yellow(stats.commands.pending)}`);
-    console.log(`  Completed: ${chalk.green(stats.commands.completedToday)}`);
-    console.log(`  Failed:    ${chalk.red(stats.commands.failedToday)}`);
-    console.log('');
-
-    // System section
-    console.log(chalk.white.bold('  System'));
-    console.log(chalk.gray('  ─────────────────────'));
-    console.log(`  Version:     ${chalk.cyan(stats.system.version)}`);
-    console.log(`  Uptime:      ${stats.system.uptime}`);
-    console.log(`  Last backup: ${formatDate(stats.system.lastBackup)}`);
-    console.log('');
-  } catch (error) {
-    spinner.fail('Failed to fetch statistics');
-    console.error(chalk.red(error));
+export const showStats = withMDM(async (mdm: MDMInstance, options: StatsOptions) => {
+  if (!mdm.dashboard) {
+    throw new Error('Dashboard manager is not available on this MDM instance.');
   }
-}
 
-function formatDate(isoString: string): string {
-  const date = new Date(isoString);
-  return date.toLocaleString();
-}
+  const spinner = ora('Fetching statistics...').start();
+  const [stats, commandRates] = await Promise.all([
+    mdm.dashboard.getStats(),
+    mdm.dashboard.getCommandSuccessRates(),
+  ]);
+  spinner.stop();
+
+  if (options.json) {
+    console.log(JSON.stringify({ ...stats, commandRates }, null, 2));
+    return;
+  }
+
+  console.log(chalk.blue('\n📊 OpenMDM Statistics\n'));
+
+  console.log(chalk.white.bold('  Devices'));
+  console.log(chalk.gray('  ─────────────────────'));
+  console.log(`  Total:       ${chalk.cyan(stats.devices.total)}`);
+  console.log(`  Enrolled:    ${chalk.green(stats.devices.enrolled)}`);
+  console.log(`  Active:      ${chalk.green(stats.devices.active)}`);
+  console.log(`  Pending:     ${chalk.yellow(stats.devices.pending)}`);
+  console.log(`  Blocked:     ${chalk.red(stats.devices.blocked)}`);
+  console.log('');
+
+  console.log(chalk.white.bold('  Policies'));
+  console.log(chalk.gray('  ─────────────────────'));
+  console.log(`  Total:       ${chalk.cyan(stats.policies.total)}`);
+  console.log(`  Deployed:    ${chalk.cyan(stats.policies.deployed)}`);
+  console.log('');
+
+  console.log(chalk.white.bold('  Applications'));
+  console.log(chalk.gray('  ─────────────────────'));
+  console.log(`  Total:       ${chalk.cyan(stats.applications.total)}`);
+  console.log(`  Deployed:    ${chalk.cyan(stats.applications.deployed)}`);
+  console.log('');
+
+  console.log(chalk.white.bold('  Commands (all time)'));
+  console.log(chalk.gray('  ─────────────────────'));
+  console.log(`  Total:       ${chalk.cyan(commandRates.overall.total)}`);
+  console.log(`  Completed:   ${chalk.green(commandRates.overall.completed)}`);
+  console.log(`  Failed:      ${chalk.red(commandRates.overall.failed)}`);
+  console.log(
+    `  Success:     ${chalk.cyan(commandRates.overall.successRate.toFixed(1) + '%')}`
+  );
+  console.log('');
+
+  console.log(chalk.white.bold('  Commands (last 24h)'));
+  console.log(chalk.gray('  ─────────────────────'));
+  console.log(`  Total:       ${chalk.cyan(commandRates.last24h.total)}`);
+  console.log(`  Completed:   ${chalk.green(commandRates.last24h.completed)}`);
+  console.log(`  Failed:      ${chalk.red(commandRates.last24h.failed)}`);
+  console.log('');
+});

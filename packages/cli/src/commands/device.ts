@@ -1,6 +1,8 @@
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import ora from 'ora';
+import type { Device, DeviceFilter, DeviceStatus, MDMInstance } from '@openmdm/core';
+import { withMDM } from '../config.js';
 
 interface ListOptions {
   status?: string;
@@ -25,116 +27,90 @@ interface RemoveOptions {
   force?: boolean;
 }
 
-// Mock data for demonstration
-const mockDevices = [
-  {
-    id: 'device_001',
-    enrollmentId: 'ENR-001',
-    model: 'Pixel 6 Pro',
-    manufacturer: 'Google',
-    status: 'enrolled',
-    osVersion: '14',
-    lastHeartbeat: new Date().toISOString(),
-    batteryLevel: 85,
-  },
-  {
-    id: 'device_002',
-    enrollmentId: 'ENR-002',
-    model: 'Galaxy S23',
-    manufacturer: 'Samsung',
-    status: 'enrolled',
-    osVersion: '13',
-    lastHeartbeat: new Date(Date.now() - 3600000).toISOString(),
-    batteryLevel: 42,
-  },
-  {
-    id: 'device_003',
-    enrollmentId: 'ENR-003',
-    model: 'Redmi Note 12',
-    manufacturer: 'Xiaomi',
-    status: 'pending',
-    osVersion: '12',
-    lastHeartbeat: null,
-    batteryLevel: null,
-  },
-];
+const VALID_STATUSES: readonly DeviceStatus[] = [
+  'pending',
+  'enrolled',
+  'unenrolled',
+  'blocked',
+] as const;
 
-export async function listDevices(options: ListOptions): Promise<void> {
-  const spinner = ora('Fetching devices...').start();
-
-  try {
-    // In real implementation, this would query the database
-    let devices = [...mockDevices];
-
-    if (options.status) {
-      devices = devices.filter(d => d.status === options.status);
-    }
-
-    const limit = parseInt(options.limit || '50');
-    devices = devices.slice(0, limit);
-
-    spinner.stop();
-
-    if (options.json) {
-      console.log(JSON.stringify(devices, null, 2));
-      return;
-    }
-
-    console.log(chalk.blue('\\n📱 Enrolled Devices\\n'));
-
-    if (devices.length === 0) {
-      console.log(chalk.gray('No devices found.'));
-      return;
-    }
-
-    // Table header
-    console.log(
-      chalk.gray(
-        `${'ID'.padEnd(15)} ${'Model'.padEnd(20)} ${'Status'.padEnd(12)} ${'OS'.padEnd(6)} ${'Battery'.padEnd(8)} ${'Last Seen'.padEnd(20)}`
-      )
-    );
-    console.log(chalk.gray('-'.repeat(85)));
-
-    // Table rows
-    for (const device of devices) {
-      const statusColor =
-        device.status === 'enrolled'
-          ? chalk.green
-          : device.status === 'pending'
-          ? chalk.yellow
-          : chalk.red;
-
-      const lastSeen = device.lastHeartbeat
-        ? formatRelativeTime(new Date(device.lastHeartbeat))
-        : 'Never';
-
-      const battery = device.batteryLevel !== null ? `${device.batteryLevel}%` : '-';
-
-      console.log(
-        `${device.id.padEnd(15)} ${device.model.padEnd(20)} ${statusColor(
-          device.status.padEnd(12)
-        )} ${device.osVersion.padEnd(6)} ${battery.padEnd(8)} ${lastSeen.padEnd(20)}`
-      );
-    }
-
-    console.log(chalk.gray(`\\nTotal: ${devices.length} devices`));
-  } catch (error) {
-    spinner.fail('Failed to fetch devices');
-    console.error(chalk.red(error));
-  }
+function isDeviceStatus(value: string): value is DeviceStatus {
+  return (VALID_STATUSES as readonly string[]).includes(value);
 }
 
-export async function showDevice(deviceId: string, options: ShowOptions): Promise<void> {
-  const spinner = ora(`Fetching device ${deviceId}...`).start();
+export const listDevices = withMDM(async (mdm: MDMInstance, options: ListOptions) => {
+  const filter: DeviceFilter = {};
 
-  try {
-    // In real implementation, this would query the database
-    const device = mockDevices.find(d => d.id === deviceId);
+  if (options.status) {
+    if (!isDeviceStatus(options.status)) {
+      throw new Error(
+        `Invalid status "${options.status}". Valid values: ${VALID_STATUSES.join(', ')}`
+      );
+    }
+    filter.status = options.status;
+  }
 
+  const limit = Number.parseInt(options.limit ?? '50', 10);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new Error(`Invalid limit: ${options.limit}`);
+  }
+  filter.limit = limit;
+
+  const spinner = ora('Fetching devices...').start();
+  const result = await mdm.devices.list(filter);
+  spinner.stop();
+
+  if (options.json) {
+    console.log(JSON.stringify(result.devices, null, 2));
+    return;
+  }
+
+  console.log(chalk.blue('\n📱 Devices\n'));
+
+  if (result.devices.length === 0) {
+    console.log(chalk.gray('No devices found.'));
+    return;
+  }
+
+  console.log(
+    chalk.gray(
+      `${'ID'.padEnd(20)} ${'Model'.padEnd(22)} ${'Status'.padEnd(12)} ${'OS'.padEnd(8)} ${'Battery'.padEnd(8)} ${'Last Seen'.padEnd(14)}`
+    )
+  );
+  console.log(chalk.gray('-'.repeat(90)));
+
+  for (const device of result.devices) {
+    const statusColor =
+      device.status === 'enrolled'
+        ? chalk.green
+        : device.status === 'pending'
+        ? chalk.yellow
+        : chalk.red;
+
+    const lastSeen = device.lastHeartbeat ? formatRelativeTime(device.lastHeartbeat) : 'Never';
+    const battery = device.batteryLevel != null ? `${device.batteryLevel}%` : '-';
+    const model = device.model ?? '-';
+    const os = device.osVersion ?? '-';
+
+    console.log(
+      `${truncate(device.id, 20).padEnd(20)} ${truncate(model, 22).padEnd(22)} ${statusColor(
+        device.status.padEnd(12)
+      )} ${os.padEnd(8)} ${battery.padEnd(8)} ${lastSeen.padEnd(14)}`
+    );
+  }
+
+  console.log(chalk.gray(`\nShowing ${result.devices.length} of ${result.total} total devices`));
+});
+
+export const showDevice = withMDM(
+  async (mdm: MDMInstance, deviceId: string, options: ShowOptions) => {
+    const spinner = ora(`Fetching device ${deviceId}...`).start();
+    const device = await mdm.devices.get(deviceId);
     spinner.stop();
 
     if (!device) {
-      console.log(chalk.red(`\\nDevice not found: ${deviceId}`));
+      console.log(chalk.red(`\nDevice not found: ${deviceId}`));
+      process.exitCode = 1;
       return;
     }
 
@@ -143,127 +119,127 @@ export async function showDevice(deviceId: string, options: ShowOptions): Promis
       return;
     }
 
-    console.log(chalk.blue(`\\n📱 Device Details: ${deviceId}\\n`));
-    console.log(`  ${chalk.gray('Enrollment ID:')}  ${device.enrollmentId}`);
-    console.log(`  ${chalk.gray('Model:')}          ${device.model}`);
-    console.log(`  ${chalk.gray('Manufacturer:')}   ${device.manufacturer}`);
-    console.log(`  ${chalk.gray('OS Version:')}     Android ${device.osVersion}`);
-    console.log(
-      `  ${chalk.gray('Status:')}         ${
-        device.status === 'enrolled' ? chalk.green(device.status) : chalk.yellow(device.status)
-      }`
-    );
-    console.log(
-      `  ${chalk.gray('Battery:')}        ${device.batteryLevel !== null ? `${device.batteryLevel}%` : '-'}`
-    );
-    console.log(
-      `  ${chalk.gray('Last Heartbeat:')} ${
-        device.lastHeartbeat ? formatRelativeTime(new Date(device.lastHeartbeat)) : 'Never'
-      }`
-    );
-    console.log('');
-  } catch (error) {
-    spinner.fail('Failed to fetch device');
-    console.error(chalk.red(error));
+    renderDeviceDetails(device);
   }
-}
+);
 
-export async function syncDevice(deviceId: string): Promise<void> {
+export const syncDevice = withMDM(async (mdm: MDMInstance, deviceId: string) => {
   const spinner = ora(`Sending sync command to ${deviceId}...`).start();
+  const command = await mdm.devices.sync(deviceId);
+  spinner.succeed(`Sync command queued for ${deviceId} (command ${command.id})`);
+  console.log(chalk.gray('The device will sync on its next connection.'));
+});
 
-  try {
-    // In real implementation, this would send a command via the MDM
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    spinner.succeed(`Sync command sent to ${deviceId}`);
-    console.log(chalk.gray('The device will sync on its next connection.'));
-  } catch (error) {
-    spinner.fail('Failed to send sync command');
-    console.error(chalk.red(error));
-  }
-}
-
-export async function lockDevice(deviceId: string, options: LockOptions): Promise<void> {
-  const spinner = ora(`Sending lock command to ${deviceId}...`).start();
-
-  try {
-    // In real implementation, this would send a lock command
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    spinner.succeed(`Lock command sent to ${deviceId}`);
-
+export const lockDevice = withMDM(
+  async (mdm: MDMInstance, deviceId: string, options: LockOptions) => {
+    const spinner = ora(`Sending lock command to ${deviceId}...`).start();
+    const command = await mdm.devices.lock(deviceId, options.message);
+    spinner.succeed(`Lock command queued for ${deviceId} (command ${command.id})`);
     if (options.message) {
       console.log(chalk.gray(`Lock screen message: "${options.message}"`));
     }
-  } catch (error) {
-    spinner.fail('Failed to send lock command');
-    console.error(chalk.red(error));
   }
-}
+);
 
-export async function wipeDevice(deviceId: string, options: WipeOptions): Promise<void> {
-  if (!options.force) {
-    console.log(chalk.red('\\n⚠️  WARNING: This will factory reset the device!'));
-    console.log(chalk.red('All data will be permanently deleted.\\n'));
+export const wipeDevice = withMDM(
+  async (mdm: MDMInstance, deviceId: string, options: WipeOptions) => {
+    if (!options.force) {
+      console.log(chalk.red('\n⚠️  WARNING: This will factory reset the device!'));
+      console.log(chalk.red('All data will be permanently deleted.\n'));
 
-    const { confirm } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: `Are you sure you want to wipe device ${deviceId}?`,
-        default: false,
-      },
-    ]);
+      const { confirm } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'confirm',
+          message: `Are you sure you want to wipe device ${deviceId}?`,
+          default: false,
+        },
+      ]);
 
-    if (!confirm) {
-      console.log(chalk.yellow('Wipe cancelled.'));
-      return;
+      if (!confirm) {
+        console.log(chalk.yellow('Wipe cancelled.'));
+        return;
+      }
     }
-  }
 
-  const spinner = ora(`Sending wipe command to ${deviceId}...`).start();
-
-  try {
-    // In real implementation, this would send a wipe command
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    spinner.succeed(`Wipe command sent to ${deviceId}`);
+    const spinner = ora(`Sending wipe command to ${deviceId}...`).start();
+    const command = await mdm.devices.wipe(deviceId, options.preserveData);
+    spinner.succeed(`Wipe command queued for ${deviceId} (command ${command.id})`);
 
     if (options.preserveData) {
       console.log(chalk.gray('SD card data will be preserved.'));
     }
-
-    console.log(chalk.yellow('\\nThe device will be wiped on its next connection.'));
-  } catch (error) {
-    spinner.fail('Failed to send wipe command');
-    console.error(chalk.red(error));
+    console.log(chalk.yellow('\nThe device will be wiped on its next connection.'));
   }
+);
+
+export const removeDevice = withMDM(
+  async (mdm: MDMInstance, deviceId: string, options: RemoveOptions) => {
+    if (!options.force) {
+      const { confirm } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'confirm',
+          message: `Are you sure you want to remove device ${deviceId} from MDM?`,
+          default: false,
+        },
+      ]);
+
+      if (!confirm) {
+        console.log(chalk.yellow('Removal cancelled.'));
+        return;
+      }
+    }
+
+    const spinner = ora(`Removing device ${deviceId}...`).start();
+    await mdm.devices.delete(deviceId);
+    spinner.succeed(`Device ${deviceId} removed from MDM`);
+  }
+);
+
+function renderDeviceDetails(device: Device): void {
+  console.log(chalk.blue(`\n📱 Device Details: ${device.id}\n`));
+  row('Enrollment ID', device.enrollmentId);
+  row('External ID', device.externalId ?? '-');
+  row('Model', device.model ?? '-');
+  row('Manufacturer', device.manufacturer ?? '-');
+  row('OS Version', device.osVersion ? `Android ${device.osVersion}` : '-');
+  row('Serial Number', device.serialNumber ?? '-');
+  row('Agent Version', device.agentVersion ?? '-');
+  console.log('');
+  row(
+    'Status',
+    device.status === 'enrolled'
+      ? chalk.green(device.status)
+      : chalk.yellow(device.status)
+  );
+  row('Policy ID', device.policyId ?? '-');
+  row('Battery', device.batteryLevel != null ? `${device.batteryLevel}%` : '-');
+  row(
+    'Storage',
+    device.storageUsed != null && device.storageTotal != null
+      ? `${formatBytes(device.storageUsed)} / ${formatBytes(device.storageTotal)}`
+      : '-'
+  );
+  row('Last Heartbeat', device.lastHeartbeat ? formatRelativeTime(device.lastHeartbeat) : 'Never');
+  row('Last Sync', device.lastSync ? formatRelativeTime(device.lastSync) : 'Never');
+  console.log('');
 }
 
-export async function removeDevice(deviceId: string, options: RemoveOptions): Promise<void> {
-  if (!options.force) {
-    const { confirm } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: `Are you sure you want to remove device ${deviceId} from MDM?`,
-        default: false,
-      },
-    ]);
+function row(label: string, value: string): void {
+  console.log(`  ${chalk.gray((label + ':').padEnd(16))} ${value}`);
+}
 
-    if (!confirm) {
-      console.log(chalk.yellow('Removal cancelled.'));
-      return;
-    }
-  }
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + '…';
+}
 
-  const spinner = ora(`Removing device ${deviceId}...`).start();
-
-  try {
-    // In real implementation, this would remove the device
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    spinner.succeed(`Device ${deviceId} removed from MDM`);
-  } catch (error) {
-    spinner.fail('Failed to remove device');
-    console.error(chalk.red(error));
-  }
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 function formatRelativeTime(date: Date): string {
