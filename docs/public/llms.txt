@@ -11,6 +11,7 @@
 - [Operations](https://openmdm.dev/docs/concepts/operations): Logging, health probes, and what you need to know to run OpenMDM in production.
 - [Installation](https://openmdm.dev/docs/installation): Install OpenMDM, set up your database schema, and create your first MDMInstance.
 - [Introduction](https://openmdm.dev/docs/introduction): OpenMDM is an embeddable Mobile Device Management SDK you drop into your existing TypeScript application.
+- [Tenant + RBAC Audit](https://openmdm.dev/docs/proposals/tenant-rbac-audit): A concrete, file-and-line audit of what multi-tenancy and authorization actually enforce in OpenMDM today, and the architectural fix path to 1.0.
 - [Quick Start](https://openmdm.dev/docs/quick-start): From nothing to an enrolled device in about 15 minutes.
 - [Kiosk Recipe](https://openmdm.dev/docs/recipes/kiosk): Lock devices to a single app, handle exit attempts, and unlock stuck devices.
 - [Webhooks Recipe](https://openmdm.dev/docs/recipes/webhooks): Send HMAC-signed webhooks to an external system and verify them on the receiver.

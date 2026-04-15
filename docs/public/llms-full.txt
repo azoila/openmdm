@@ -4,7 +4,7 @@
 > It is generated from the MDX sources at docs/content/docs. Paste it into
 > an LLM context window to ask questions without fetching pages individually.
 
-> Generated: 2026-04-15T16:01:36.506Z
+> Generated: 2026-04-15T16:29:59.180Z
 
 ---
 
@@ -1109,6 +1109,156 @@ A single `createMDM()` call returns an `MDMInstance` with managers (`devices`, `
 - **[Architecture](/docs/concepts/architecture)** — the control flow for enrollment, heartbeats, and commands. Read this before making architectural decisions.
 - **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the single most confusing distinction for newcomers. Read before writing any policy.
 - **[Agent Wire Protocol](/docs/concepts/agent-protocol)** — why `/agent/*` responses use an envelope and how v1/v2 coexist during rollout.
+
+---
+
+## Tenant + RBAC Audit
+
+*URL: https://openmdm.dev/docs/proposals/tenant-rbac-audit*
+
+*A concrete, file-and-line audit of what multi-tenancy and authorization actually enforce in OpenMDM today, and the architectural fix path to 1.0.*
+
+# Tenant + RBAC Audit
+
+> **Status:** this document is the output of Stage-1 milestone 3 of the OpenMDM hardening roadmap. It is a point-in-time audit, not a plan — the plan lives in the GitHub issues linked at the bottom. Numbers and file:line refs are accurate as of `@openmdm/core@0.8.0`.
+
+## Summary
+
+OpenMDM ships three managers that *look* like enterprise-grade multi-tenancy and RBAC:
+
+- `mdm.tenants` — `TenantManager`, backed by `packages/core/src/tenant.ts`.
+- `mdm.authorization` — `AuthorizationManager`, backed by `packages/core/src/authorization.ts`.
+- `mdm.audit` — `AuditManager`, backed by `packages/core/src/audit.ts`.
+
+**None of them enforce anything today.** They are façades: they manage their own rows (tenants, users, roles, audit logs), they expose the API you would expect, and they are never consulted by the actual resource managers (`devices`, `policies`, `commands`, `applications`, `groups`).
+
+Concretely, this means:
+
+1. `mdm.devices.list()` returns every device in the database, across every tenant. There is no `tenantId` column to filter on.
+2. `mdm.devices.delete(id)` works regardless of whether the calling user has a permission that allows it. The `AuthorizationManager.requirePermission(...)` call is never made anywhere in the codebase.
+3. Admin actions are not recorded. `AuditManager.log(...)` is never called.
+4. The default Hono adapter, until this release, accepted unauthenticated requests on every admin route. That is now fixed — see [What this PR fixes](#what-this-pr-fixes) below — but the underlying architectural holes remain.
+
+This is not a minor patch. It's a set of architectural gaps that need coordinated changes across the type system, the database schema, every manager, and the Hono adapter. The audit does not attempt to fix all of it at once; instead it lays out exactly what is broken, produces a loud-failure backstop for the most dangerous path (multi-tenant dashboards), and files specific follow-up items as GitHub issues.
+
+## Findings
+
+### Finding 1 — Core resources have no `tenantId` [CRITICAL]
+
+**Where:** `packages/core/src/types.ts:14-118` for `Device` and `Policy`; also `Application`, `Command`, `MDMEvent`, `Group`, `PushToken`.
+
+**What's missing:** none of these types declare a `tenantId` field. The `Postgres` schema in `packages/adapters/drizzle/src/postgres.ts` has no `tenant_id` column on any of the corresponding tables.
+
+**Impact:** there is no database-level way to scope a list or a lookup to one tenant. `mdm.devices.list({ tenantId: 'acme' })` is not a syntax error at the type level, and the `DeviceFilter` type does not accept a `tenantId` field, so the question "give me devices for this tenant" has no answer that doesn't involve adding a column.
+
+**Example:**
+
+```typescript
+// Today — regardless of tenant context
+const { devices } = await mdm.devices.list();
+// → returns every device across every tenant in the fleet
+```
+
+**Compare to types that *do* have `tenantId`:**
+
+- `Role` (`types.ts:1361-1370`)
+- `User` (`types.ts:1385-1400`)
+- `AuditLog` (`types.ts:1437-1450`)
+- `ScheduledTask` (`types.ts:1522-1538`)
+- `QueuedMessage` (`types.ts:1595-1610`)
+
+The RBAC + bookkeeping types *do* have tenant fields, but the resources they are supposed to govern do not. It is as if the keys existed but the doors did not.
+
+### Finding 2 — `AuthorizationManager` is never consulted [CRITICAL]
+
+**Where:** `packages/core/src/index.ts` has zero `authorization.` references. `packages/adapters/hono/src/index.ts` has zero `requirePermission` or `mdm.authorization.can` references.
+
+**What's there:** `createAuthorizationManager(db)` builds a manager with `can()`, `requirePermission()`, `canAny()`, `isAdmin()`, plus full CRUD for roles and users. It is exposed as `mdm.authorization`. The permission model is rich — `PermissionAction` has `create`/`read`/`update`/`delete`/`manage`/`*`, and `PermissionResource` covers every core resource.
+
+**What isn't there:** a single call site in the resource managers or the HTTP adapter. `mdm.devices.delete(deviceId)` runs with full privileges. The hono admin middleware ([Finding 4](#finding-4--admin-auth-defaulted-to-off--fixed-in-this-pr-high)) is a binary "is admin" check handled by the host's custom `config.auth.isAdmin(user)` callback, not RBAC.
+
+**Impact:** every tool that builds on OpenMDM and wants "field techs can lock devices but not wipe them" has to enforce that in their own code, before calling the managers. The provided RBAC machinery is dead code from an enforcement perspective.
+
+### Finding 3 — `AuditManager` is never consulted [HIGH]
+
+**Where:** `packages/core/src/index.ts` has zero `audit.log(` references. Same for the Hono adapter.
+
+**Impact:** admin actions (create a policy, wipe a device, delete a user) are not recorded. The `mdm_audit_logs` table will be empty on any deployment unless the host calls `mdm.audit.log(...)` themselves. Compliance reviews that ask "who did what and when" will find nothing in OpenMDM's audit surface.
+
+### Finding 4 — Admin auth defaulted to OFF [FIXED in this PR, HIGH]
+
+**Where:** `packages/adapters/hono/src/index.ts:82` declared `enableAuth?: boolean` with no default, and line 422 et al. wrote `if (options.enableAuth)` — a falsy-by-default gate. The Quick Start, Installation, and Webhooks docs did not mention setting it.
+
+**Impact (historical, before this PR):** users following the quick-start verbatim deployed the hono adapter with every admin route wide open. `GET /mdm/devices`, `DELETE /mdm/devices/:id`, `POST /mdm/policies`, `POST /mdm/commands` — all accepted any request from any source. The only auth enforcement on admin routes came from whatever parent router the host happened to put in front of OpenMDM, and there was no guarantee the host remembered to do that.
+
+**The fix:** `honoAdapter()` now defaults `enableAuth` to `true` and logs a loud startup warning in two specific states:
+
+1. `enableAuth: true` (the new default) but `mdm.config.auth` is missing. The middleware still runs but has no `getUser(c)` resolver, so every request passes through. The warning names the exact thing you forgot to configure.
+2. `enableAuth: false` was passed explicitly. The warning acknowledges it — if you turned it off deliberately, you get one log line on startup acknowledging "yes, admin routes are unauthenticated, I'm opting out because I have a parent router handling this."
+
+This is a behavior change. Hosts that had been running without admin auth by accident will now get a startup warning; hosts that explicitly opted out will keep working with a one-line acknowledgement log. Neither is breaking in a code sense, but it *is* breaking in an operational sense for unaware deployments — which is the point.
+
+### Finding 5 — Dashboard fallback silently ignores `tenantId` [FIXED in this PR, HIGH]
+
+**Where:** `packages/core/src/dashboard.ts:24-90` (`getStats`), 92-135 (`getDeviceStatusBreakdown`), 137-211 (`getEnrollmentTrend`), 213-272 (`getCommandSuccessRates`), 274-326 (`getAppInstallationSummary`).
+
+**What was happening:** each method accepted an optional `tenantId` parameter and forwarded it to a matching database method (e.g. `db.getDashboardStats(tenantId)`) *if that method was implemented on the adapter*. If the adapter didn't implement the tenant-scoped version, the method fell through to a fallback that ran global queries through `db.listDevices()`, `db.listCommands()`, `db.listEvents()` — and the `tenantId` parameter was **silently discarded**.
+
+**Impact:** `mdm.dashboard.getStats('acme')` on the Drizzle adapter (which does not implement any of the tenant-scoped dashboard methods) returned fleet-wide stats. A host displaying those numbers to a tenant dashboard page would cheerfully show device counts from every other tenant in the same database.
+
+**The fix:** a new helper `assertNoTenantScopeRequested(tenantId, method)` throws a descriptive error when a caller passes a `tenantId` to a fallback path that cannot honor it. Callers that want global stats pass `undefined` and everything keeps working. Callers that want tenant stats get a loud error pointing them at the `DatabaseAdapter` method they need to implement.
+
+This is a loud-failure backstop, not a fix for the root cause. The root cause is Finding 1. Once core resources gain a `tenantId` column, the fallback path can filter through `listDevices({ tenantId })` and this assertion becomes dead code.
+
+## What this PR fixes
+
+1. **Hono adapter `enableAuth` default flipped to `true`.** Startup warnings fire when the enforcement has a gap (missing `config.auth`) or when it is explicitly disabled. Users following the quick start no longer ship wide-open admin routes by accident.
+2. **Dashboard fallback assertions.** `mdm.dashboard.getStats('tenant-a')` now throws loudly when the DB adapter cannot honor the scope, rather than silently returning global data.
+3. **This document.** A public audit that names every gap, points at every line, and sets expectations for what OpenMDM does *not* enforce today so operators can plan around it.
+4. **Pinning tests** in `packages/core/tests/tenant-isolation.pinning.test.ts` that assert the **current** (broken) behavior. These are intentionally negative — when the architectural fix lands, they will break and need to be rewritten. That is the point: they are tripwires, not guarantees.
+
+## What this PR does NOT fix
+
+The architectural work that would actually deliver tenant isolation and RBAC enforcement:
+
+- Adding `tenantId` to `Device`, `Policy`, `Application`, `Command`, `Group`, `MDMEvent`, `PushToken` in both the TypeScript types and the Drizzle Postgres schema.
+- Extending every `DatabaseAdapter` list/find/create/update/delete method to accept a tenant context, and rewriting the Drizzle adapter to scope its SQL.
+- Wiring `AuthorizationManager.requirePermission(...)` into every mutating manager call, with the calling user resolved from the request context.
+- Emitting `AuditManager.log(...)` for every admin-visible action.
+- Extending the SQLite and MySQL schema stubs to match (they are currently stubs that throw on import).
+
+Each of these is a multi-file change with its own migration story. Bundling them into this PR would have made it unreviewable. They are filed as follow-up issues with the roadmap label.
+
+## Follow-up issues
+
+These are the concrete issues that together would close Finding 1, Finding 2, and Finding 3. None are in scope for this audit PR.
+
+1. **roadmap: add `tenantId` column to core resource tables.** Schema migration, Drizzle adapter rewrite, SQLite/MySQL schema files. Includes a backfill plan for existing deployments.
+2. **roadmap: thread tenant context through every manager method.** Adds a `context` argument carrying `tenantId` and caller identity. All `DatabaseAdapter` methods gain matching filters. Includes contract tests against the drizzle e2e Postgres harness.
+3. **roadmap: enforce `AuthorizationManager.requirePermission` in resource managers.** Wires permission checks into every mutating path and documents the contract: create/read/update/delete maps to the same permission actions, `manage` is the shortcut, `*` is the admin shortcut.
+4. **roadmap: emit `AuditManager.log` for every mutating manager call.** Every create/update/delete writes an audit row with the calling user, the tenant, the resource, the outcome, and the delta.
+5. **roadmap: design spec for multi-tenant dashboards against real SQL.** Once Finding 1 lands, rewrite the dashboard fallbacks to filter through `listDevices({ tenantId })` and friends, then delete the assertions from Finding 5.
+
+Each of those becomes trackable work once filed. The order above is mandatory — you cannot enforce permissions on resources that are not yet tenant-scoped, and you cannot audit what you are not yet enforcing.
+
+## How to operate OpenMDM *today* in a multi-tenant deployment
+
+Until the architectural work above is complete, the realistic options for a host building a multi-tenant SaaS on OpenMDM are:
+
+- **Run one OpenMDM instance per tenant.** Separate database, separate process, separate push adapter. Full isolation at the deployment level. Heavy, but completely safe.
+- **Run one OpenMDM instance with one shared database and do tenant scoping in the host's own query layer.** Every call to `mdm.devices.list()` becomes `const all = await mdm.devices.list(); return all.devices.filter(d => d.metadata?.tenantId === currentTenant)`. This is what the existing `metadata` JSONB column is for. Cheap and practical, but relies entirely on the host remembering to filter every path.
+- **Wait for Finding 1 to ship.** Tracked on the roadmap.
+
+The hono adapter's `enableAuth: true` default (after this PR) at least ensures admin routes are gated. RBAC inside that gate is still the host's responsibility today.
+
+## References
+
+- `packages/core/src/tenant.ts` — the TenantManager façade
+- `packages/core/src/authorization.ts` — the AuthorizationManager façade
+- `packages/core/src/audit.ts` — the AuditManager façade
+- `packages/core/src/dashboard.ts` — now with loud failure on tenant scope mismatch
+- `packages/adapters/hono/src/index.ts` — now with `enableAuth: true` default
+- `packages/core/tests/tenant-isolation.pinning.test.ts` — pinning tests for the current broken state
 
 ---
 

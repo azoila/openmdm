@@ -77,7 +77,22 @@ export interface HonoAdapterOptions {
   basePath?: string;
 
   /**
-   * Enable authentication middleware for admin routes
+   * Enable authentication middleware for admin routes.
+   *
+   * **Defaults to `true`.** Admin routes that return device lists,
+   * accept policy writes, or queue commands should never be exposed
+   * unauthenticated. The previous default of `false` was a footgun
+   * — users following the quick start ended up with wide-open admin
+   * routes in production.
+   *
+   * To enforce, you must also pass `mdm.config.auth` to `createMDM`
+   * so the middleware has a `getUser(c)` implementation to call.
+   * Without `config.auth`, the middleware is a no-op regardless of
+   * this flag — and passing `enableAuth: false` explicitly is the
+   * only way to silence the startup warning.
+   *
+   * Set this to `false` only when you are wrapping the adapter in
+   * a parent router that already authenticates every request.
    */
   enableAuth?: boolean;
 
@@ -119,6 +134,35 @@ export function honoAdapter(
     events: true,
     ...options.routes,
   };
+
+  // Default to requiring admin auth on admin routes. This is a
+  // deliberate footgun-prevention default — the previous default
+  // was `false` and it shipped wide-open admin routes to anyone
+  // following the quick start.
+  const enableAuth = options.enableAuth ?? true;
+  const adapterLog = mdm.logger.child({ component: 'hono' });
+
+  // Warn at startup if the caller enabled auth but forgot to
+  // configure `config.auth`. Without the latter, the middleware
+  // still runs but has no user resolver, and every request passes
+  // through as if authentication was disabled.
+  if (enableAuth && !mdm.config.auth) {
+    adapterLog.warn(
+      { reason: 'auth-enabled-but-not-configured' },
+      'honoAdapter has enableAuth: true but mdm.config.auth is missing. ' +
+        'Admin routes will accept every request. Pass config.auth to ' +
+        'createMDM, or set enableAuth: false explicitly if you wrap this ' +
+        'adapter in a parent router that already authenticates.',
+    );
+  }
+  if (!enableAuth) {
+    adapterLog.warn(
+      { reason: 'auth-explicitly-disabled' },
+      'honoAdapter is mounted with enableAuth: false. Admin routes are ' +
+        'unauthenticated. This is only safe when wrapped in a parent ' +
+        'router that authenticates every request.',
+    );
+  }
 
   // Error handling middleware
   app.onError((error, c) => {
@@ -419,7 +463,7 @@ export function honoAdapter(
   if (routes.devices) {
     const devices = new Hono<MDMEnv>();
 
-    if (options.enableAuth) {
+    if (enableAuth) {
       devices.use('/*', adminAuth);
     }
 
@@ -529,7 +573,7 @@ export function honoAdapter(
   if (routes.policies) {
     const policies = new Hono<MDMEnv>();
 
-    if (options.enableAuth) {
+    if (enableAuth) {
       policies.use('/*', adminAuth);
     }
 
@@ -599,7 +643,7 @@ export function honoAdapter(
   if (routes.applications) {
     const applications = new Hono<MDMEnv>();
 
-    if (options.enableAuth) {
+    if (enableAuth) {
       applications.use('/*', adminAuth);
     }
 
@@ -702,7 +746,7 @@ export function honoAdapter(
   if (routes.groups) {
     const groups = new Hono<MDMEnv>();
 
-    if (options.enableAuth) {
+    if (enableAuth) {
       groups.use('/*', adminAuth);
     }
 
@@ -776,7 +820,7 @@ export function honoAdapter(
   if (routes.commands) {
     const commands = new Hono<MDMEnv>();
 
-    if (options.enableAuth) {
+    if (enableAuth) {
       commands.use('/*', adminAuth);
     }
 
@@ -826,7 +870,7 @@ export function honoAdapter(
   if (routes.events) {
     const events = new Hono<MDMEnv>();
 
-    if (options.enableAuth) {
+    if (enableAuth) {
       events.use('/*', adminAuth);
     }
 
