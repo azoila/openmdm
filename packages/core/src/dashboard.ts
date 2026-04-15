@@ -17,6 +17,34 @@ import type {
 } from './types';
 
 /**
+ * Throws if a tenantId is supplied to a dashboard method whose
+ * database adapter does not implement the tenant-scoped version.
+ *
+ * The old behavior — silently ignoring the tenantId and returning
+ * global stats — was a data-leak footgun in multi-tenant deployments.
+ * We would rather fail loudly than return fleet-wide numbers to a
+ * caller who thought they were asking about one tenant.
+ *
+ * The audit recommended this as a backstop until core resources gain
+ * a real `tenantId` column. Once that lands, this guard becomes
+ * redundant — the fallback paths will be able to filter themselves.
+ */
+function assertNoTenantScopeRequested(
+  tenantId: string | undefined,
+  method: string,
+): void {
+  if (tenantId) {
+    throw new Error(
+      `DashboardManager.${method} was called with a tenantId but the ` +
+        'database adapter does not implement tenant-scoped dashboard ' +
+        'queries. Implement the matching DatabaseAdapter method, or omit ' +
+        'tenantId to accept global stats. See ' +
+        'docs/proposals/tenant-rbac-audit.md for context.',
+    );
+  }
+}
+
+/**
  * Create a DashboardManager instance
  */
 export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
@@ -26,6 +54,10 @@ export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
       if (db.getDashboardStats) {
         return db.getDashboardStats(_tenantId);
       }
+
+      // No tenant-scoped path available in the fallback. Refuse
+      // rather than silently returning global stats.
+      assertNoTenantScopeRequested(_tenantId, 'getStats');
 
       // Fallback: compute from individual queries
       const devices = await db.listDevices({
@@ -94,6 +126,8 @@ export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
         return db.getDeviceStatusBreakdown(_tenantId);
       }
 
+      assertNoTenantScopeRequested(_tenantId, 'getDeviceStatusBreakdown');
+
       const devices = await db.listDevices({
         limit: 10000,
       });
@@ -138,6 +172,8 @@ export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
       if (db.getEnrollmentTrend) {
         return db.getEnrollmentTrend(days, _tenantId);
       }
+
+      assertNoTenantScopeRequested(_tenantId, 'getEnrollmentTrend');
 
       // Generate trend data from event history
       const now = new Date();
@@ -215,6 +251,8 @@ export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
         return db.getCommandSuccessRates(_tenantId);
       }
 
+      assertNoTenantScopeRequested(_tenantId, 'getCommandSuccessRates');
+
       const now = new Date();
       const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
@@ -275,6 +313,8 @@ export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
       if (db.getAppInstallationSummary) {
         return db.getAppInstallationSummary(_tenantId);
       }
+
+      assertNoTenantScopeRequested(_tenantId, 'getAppInstallationSummary');
 
       // Get all apps
       const apps = await db.listApplications();
