@@ -1,5 +1,12 @@
 # @openmdm/drizzle-adapter
 
+## 0.3.2
+
+### Patch Changes
+
+- Updated dependencies [[`ff0ec7f`](https://github.com/azoila/openmdm/commit/ff0ec7f545f97b2ed3620ceb542ef318ba52533c)]:
+  - @openmdm/core@0.7.0
+
 ## 0.3.1
 
 ### Patch Changes
