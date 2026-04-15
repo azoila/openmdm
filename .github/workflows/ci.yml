@@ -132,6 +132,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Build workspace packages first. The e2e suite imports
+      # drizzle-adapter from source, and drizzle-adapter re-exports
+      # from `@openmdm/core/schema` — which only resolves once core
+      # has been built into dist/. A pure source import bypasses the
+      # package.json exports map and fails in CI.
+      - name: Build
+        run: pnpm build
+
       - name: Run e2e tests
         env:
           DATABASE_URL: postgres://openmdm:openmdm@localhost:54329/openmdm_test
