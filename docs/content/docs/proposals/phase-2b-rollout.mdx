@@ -1,0 +1,222 @@
+---
+title: "Phase 2b: Device-Pinned-Key Rollout"
+description: Tracks what has shipped in @openmdm/core for device-pinned-key enrollment and the Android-side work required to adopt it. Not a design spec — the server side is already implemented.
+---
+
+# Phase 2b: Device-Pinned-Key Rollout
+
+> **Status.** The server-side primitives shipped in `@openmdm/core` and `@openmdm/hono`. This document tracks the remaining work in `openmdm-android` (and any agent fork) required to turn the new path on in production. It is a rollout tracker, not a design spec — the design is already encoded in [`concepts/enrollment`](/docs/concepts/enrollment) and the source under `packages/core/src/device-identity.ts`.
+
+## What shipped on the server
+
+- `@openmdm/core`:
+  - `device-identity.ts` module — `importPublicKeyFromSpki`, `verifyEcdsaSignature`, `canonicalEnrollmentMessage`, `canonicalDeviceRequestMessage`, `verifyDeviceRequest`. Zero dependencies; uses Node's built-in `node:crypto`.
+  - New error types: `InvalidPublicKeyError`, `PublicKeyMismatchError`, `ChallengeInvalidError`.
+  - `EnrollmentRequest` gains optional `publicKey` and `attestationChallenge` fields.
+  - `Device` gains `publicKey` and `enrollmentMethod` fields.
+  - `EnrollmentConfig` gains a `pinnedKey` block for opt-in enforcement.
+  - `DatabaseAdapter` gains four optional methods for challenge storage: `createEnrollmentChallenge`, `findEnrollmentChallenge`, `consumeEnrollmentChallenge`, `pruneExpiredEnrollmentChallenges`.
+  - `mdm.enroll()` branches on `publicKey` presence and enforces continuity on re-enrollment.
+- `@openmdm/drizzle-adapter`:
+  - New `mdm_enrollment_challenges` table and new `public_key` + `enrollment_method` columns on `mdm_devices` in the Postgres schema.
+  - Adapter methods implemented, including an atomic `UPDATE ... WHERE consumed_at IS NULL RETURNING *` consume path.
+  - Full e2e test coverage against real Postgres, including the concurrent-consume race invariant.
+- `@openmdm/hono`:
+  - New `GET /agent/enroll/challenge` route. Returns 503 when the underlying adapter does not support challenge storage.
+
+This is enough to accept enrollments on the new path. **No device can actually use the new path yet**, because the Android agent has not been updated to generate a Keystore keypair and sign with it. That's the rest of this document.
+
+## What is still needed on the agent side
+
+These are the concrete changes to `openmdm-android` (and to any fork of it, including `midiamob-solution/apps/mobile/openmdm-android`) required before the pinned-key path can be turned on for real devices.
+
+### 1. Generate an ECDSA P-256 keypair in the Keystore on first enrollment
+
+```kotlin
+// agent/src/main/java/com/openmdm/agent/security/DeviceIdentity.kt
+object DeviceIdentity {
+    private const val ALIAS = "openmdm_device_identity"
+    private const val KEYSTORE = "AndroidKeyStore"
+
+    fun getOrCreateKeyPair(): KeyPair {
+        val ks = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+
+        if (ks.containsAlias(ALIAS)) {
+            val privateKey = ks.getKey(ALIAS, null) as java.security.PrivateKey
+            val publicKey = ks.getCertificate(ALIAS).publicKey
+            return KeyPair(publicKey, privateKey)
+        }
+
+        val spec = KeyGenParameterSpec.Builder(
+            ALIAS,
+            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
+        )
+            .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setUserAuthenticationRequired(false) // device identity, not a user credential
+            // StrongBox if the device supports it; fall back transparently.
+            .apply {
+                if (Build.VERSION.SDK_INT >= 28 &&
+                    context.packageManager.hasSystemFeature(
+                        PackageManager.FEATURE_STRONGBOX_KEYSTORE,
+                    )
+                ) {
+                    setIsStrongBoxBacked(true)
+                }
+            }
+            .build()
+
+        val generator = KeyPairGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_EC,
+            KEYSTORE,
+        )
+        generator.initialize(spec)
+        return generator.generateKeyPair()
+    }
+
+    fun publicKeySpkiBase64(): String =
+        Base64.encodeToString(getOrCreateKeyPair().public.encoded, Base64.NO_WRAP)
+}
+```
+
+The key is created once, persists in the Keystore across app reinstalls (unless the user explicitly clears app data or factory-resets), and never leaves the device's secure container. On ZK-R32D and similar vendor boards that lack StrongBox, the `setIsStrongBoxBacked` call is skipped and the key lives in the software Keystore — still sandboxed per-app, still better than a shared HMAC secret, still compatible with every check the server does.
+
+### 2. Fetch a challenge before enrollment
+
+```kotlin
+val challengeResponse = api.fetchEnrollmentChallenge() // GET /agent/enroll/challenge
+val challenge = challengeResponse.challenge
+val expiresAt = challengeResponse.expiresAt
+```
+
+### 3. Sign the canonical enrollment message and POST
+
+```kotlin
+val publicKey = DeviceIdentity.publicKeySpkiBase64()
+val canonical = listOf(
+    publicKey,
+    deviceInfo.model,
+    deviceInfo.manufacturer,
+    deviceInfo.osVersion,
+    deviceInfo.serialNumber.orEmpty(),
+    deviceInfo.imei.orEmpty(),
+    deviceInfo.macAddress.orEmpty(),
+    deviceInfo.androidId.orEmpty(),
+    method,
+    timestamp,
+    challenge,
+).joinToString("|")
+
+val signer = Signature.getInstance("SHA256withECDSA").apply {
+    initSign(DeviceIdentity.getOrCreateKeyPair().private)
+    update(canonical.toByteArray(Charsets.UTF_8))
+}
+val signatureBase64 = Base64.encodeToString(signer.sign(), Base64.NO_WRAP)
+
+api.enroll(EnrollmentRequest(
+    // ...existing fields
+    publicKey = publicKey,
+    attestationChallenge = challenge,
+    signature = signatureBase64,
+))
+```
+
+The canonical form **must** match `canonicalEnrollmentMessage(...)` in `@openmdm/core` exactly. A single byte drift and the server rejects every enrollment. The server-side contract test at `packages/core/tests/device-identity.test.ts` pins the current shape; the Android side should have a mirror test that builds the same message and compares strings.
+
+### 4. Gap: the agent's current canonical HMAC form is broken
+
+`openmdm-android/agent/src/main/java/com/openmdm/agent/util/SignatureGenerator.kt:25` uses `"{identifier}:{timestamp}"` as the HMAC canonical form. This is the old broken form from before openmdm PR #9 fixed it. **The current agent cannot successfully enroll against a current openmdm server using the HMAC path.** Fix this first — it's blocking all enrollment today, not just the new path. The correct form is documented in `packages/core/src/index.ts:verifyEnrollmentSignature`.
+
+### 5. Gap: the agent does not send `X-Openmdm-Protocol: 2`
+
+The envelope protocol exists specifically to prevent the auto-unenroll bug that transient 401/404 responses used to cause. The agent never opts into it, so it still interprets raw HTTPException responses and is vulnerable to the original bug. Add:
+
+```kotlin
+// In the OkHttp client builder, next to interceptors.
+.addInterceptor { chain ->
+    chain.proceed(
+        chain.request().newBuilder()
+            .addHeader("X-Openmdm-Protocol", "2")
+            .build()
+    )
+}
+```
+
+And on the agent side, handle the `AgentResponse<T>` envelope explicitly — `action: 'reauth'` refreshes the token, `action: 'unenroll'` triggers deliberate re-enrollment, `action: 'retry'` backs off. See [`concepts/agent-protocol`](/docs/concepts/agent-protocol).
+
+### 6. Gap: no TLS certificate pinning
+
+`openmdm-android`'s OkHttp client has no `CertificatePinner`. A MITM on the network during the **first** enrollment can substitute their own server TLS certificate, handshake the agent, and receive the device's public key as a client pinning itself against the attacker's server instead of the real one. After that, the attacker owns the device's identity forever.
+
+Device-pinned-key enrollment is **not secure without TLS pinning**. Either:
+
+- Pin the server's public key via OkHttp's `CertificatePinner` with the expected SPKI hash, rotated via the existing APK release cadence.
+- Or pin the issuer (Let's Encrypt ISRG X1, GoDaddy, whatever) via a custom `X509TrustManager` that accepts only certs under that issuer for the known server hostname.
+
+Pinning must land in the Android repo **in the same release** that enables device-pinned-key enrollment. If it doesn't, the feature is a net security regression — the HMAC path at least has a shared secret an attacker needs, while the pinned-key path without TLS pinning lets an attacker silently bootstrap their own identity.
+
+### 7. Hardware feature detection
+
+Add a pre-flight check so the agent can fall back gracefully on ancient devices:
+
+```kotlin
+val hasKeystore = context.packageManager.hasSystemFeature(
+    PackageManager.FEATURE_HARDWARE_KEYSTORE,
+)
+// If false, the device has no hardware Keymaster at all. The
+// software Keystore will still produce a usable key, but operators
+// who want a hardware-backed guarantee should reject the device.
+```
+
+minSdk 26 is fine for the ECDSA P-256 + software Keystore path. StrongBox requires API 28+, so the `setIsStrongBoxBacked` call needs a version gate.
+
+## Rollout order
+
+Do these in order. Each step is independently shippable and each depends on the previous.
+
+1. **Fix `SignatureGenerator.kt` to use the correct nine-field HMAC canonical form.** This unblocks enrollment against the current openmdm server. No new features — just fixing a pre-existing bug.
+2. **Add `X-Openmdm-Protocol: 2` header** and handle envelope responses end-to-end. Makes the agent match the server's current wire protocol.
+3. **Add OkHttp `CertificatePinner`** with the production server's SPKI hash. This is the precondition for step 4.
+4. **Generate EC P-256 keypair in the Keystore** on first run, add the `fetchEnrollmentChallenge()` → `signCanonical()` flow, submit the new enrollment shape.
+5. **Let the fleet drain** onto the new path for a month or two while `enrollment.pinnedKey.required` stays `false` on the server.
+6. **Flip `required: true`** once metrics show every device has re-enrolled on the pinned-key path.
+
+## Cross-service reuse
+
+The most interesting consequence of pinning a public key on the device row is that **the same identity becomes usable from services that aren't openmdm at all**. Any backend that imports `@openmdm/core` can call `verifyDeviceRequest({ mdm, deviceId, canonicalMessage, signatureBase64 })` and get a pass/fail against the same pinned key. See the ["Reusing the same identity outside OpenMDM"](/docs/concepts/enrollment#reusing-the-same-identity-outside-openmdm) section of the enrollment page.
+
+For midiamob specifically: the `deviceValidation.ts` middleware currently verifies an HMAC against a shared `DEVICE_HMAC_SECRET` and looks up the device by pairing code. The migration to device-pinned-key auth is a one-file change:
+
+```typescript
+import { verifyDeviceRequest, canonicalDeviceRequestMessage } from '@openmdm/core';
+
+// middleware body
+const canonical = canonicalDeviceRequestMessage({
+  deviceId: pairingCode,
+  timestamp,
+  body,
+});
+const result = await verifyDeviceRequest({
+  mdm,
+  deviceId: pairingCode, // or whatever maps to Device.id
+  canonicalMessage: canonical,
+  signatureBase64: signature,
+});
+
+if (!result.ok) {
+  if (result.reason === 'no-pinned-key') {
+    // Legacy device, still on HMAC. Fall back to the old path.
+    return legacyHmacVerify(c, next);
+  }
+  return c.json({ error: result.reason }, 401);
+}
+```
+
+The player app signs its requests the same way the agent would: using the device's Keystore private key exposed via the agent's `MDMContentProvider` (or a sibling `signRequest(nonce)` ContentProvider method if you want to avoid exposing the private key material even to other apps on the same device). That interface is a midiamob-side design decision, not an openmdm one.
+
+## References
+
+- [`/docs/concepts/enrollment`](/docs/concepts/enrollment) — the full server-side contract for both paths.
+- `packages/core/src/device-identity.ts` — the crypto primitives.
+- `packages/core/tests/device-identity.test.ts` — the contract tests that pin the canonical form.
+- `tests/e2e/tests/enrollment-challenge.e2e.test.ts` — the Postgres-backed round-trip test.

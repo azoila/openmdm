@@ -1,7 +1,10 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
-import { mdmPluginStorage } from '../../../packages/adapters/drizzle/src/postgres';
+import {
+  mdmPluginStorage,
+  mdmEnrollmentChallenges,
+} from '../../../packages/adapters/drizzle/src/postgres';
 
 export const DATABASE_URL =
   process.env.DATABASE_URL ??
@@ -24,9 +27,12 @@ export async function connect(): Promise<{
   close: () => Promise<void>;
 }> {
   const client = postgres(DATABASE_URL, { max: 4, prepare: false });
-  const db = drizzle(client, { schema: { mdmPluginStorage } });
+  const db = drizzle(client, {
+    schema: { mdmPluginStorage, mdmEnrollmentChallenges },
+  });
 
   await bootstrapPluginStorageTable(db);
+  await bootstrapEnrollmentChallengesTable(db);
 
   return {
     db,
@@ -70,4 +76,32 @@ async function bootstrapPluginStorageTable(db: TestDB): Promise<void> {
  */
 export async function resetPluginStorage(db: TestDB): Promise<void> {
   await db.execute(sql`TRUNCATE TABLE mdm_plugin_storage`);
+}
+
+/**
+ * Create the `mdm_enrollment_challenges` table if it does not
+ * exist. Must stay in lockstep with `postgres.ts`'s
+ * `mdmEnrollmentChallenges` table definition.
+ */
+async function bootstrapEnrollmentChallengesTable(db: TestDB): Promise<void> {
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS mdm_enrollment_challenges (
+      challenge VARCHAR(255) PRIMARY KEY,
+      expires_at TIMESTAMPTZ NOT NULL,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS mdm_enrollment_challenges_expires_at_idx
+      ON mdm_enrollment_challenges (expires_at)
+  `);
+}
+
+/**
+ * Wipe the enrollment challenges table between tests.
+ */
+export async function resetEnrollmentChallenges(db: TestDB): Promise<void> {
+  await db.execute(sql`TRUNCATE TABLE mdm_enrollment_challenges`);
 }

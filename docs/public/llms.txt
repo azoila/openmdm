@@ -7,10 +7,11 @@
 - [Agent Wire Protocol](https://openmdm.dev/docs/concepts/agent-protocol): Why /agent/* responses use an envelope, and how v1 and v2 clients coexist during rollout.
 - [Architecture](https://openmdm.dev/docs/concepts/architecture): How OpenMDM fits into your backend and how data flows between your server and devices.
 - [Commands vs Policies](https://openmdm.dev/docs/concepts/commands-and-policies): The single most confusing distinction in OpenMDM. Read this before writing anything.
-- [Enrollment](https://openmdm.dev/docs/concepts/enrollment): How a device proves it's allowed to join the fleet and how OpenMDM validates it.
+- [Enrollment](https://openmdm.dev/docs/concepts/enrollment): How a device proves it's allowed to join the fleet and how OpenMDM validates it. Covers both the legacy HMAC path and the preferred device-pinned-key path.
 - [Operations](https://openmdm.dev/docs/concepts/operations): Logging, health probes, and what you need to know to run OpenMDM in production.
 - [Installation](https://openmdm.dev/docs/installation): Install OpenMDM, set up your database schema, and create your first MDMInstance.
 - [Introduction](https://openmdm.dev/docs/introduction): OpenMDM is an embeddable Mobile Device Management SDK you drop into your existing TypeScript application.
+- [Phase 2b: Device-Pinned-Key Rollout](https://openmdm.dev/docs/proposals/phase-2b-rollout): Tracks what has shipped in @openmdm/core for device-pinned-key enrollment and the Android-side work required to adopt it. Not a design spec — the server side is already implemented.
 - [Tenant + RBAC Audit](https://openmdm.dev/docs/proposals/tenant-rbac-audit): A concrete, file-and-line audit of what multi-tenancy and authorization actually enforce in OpenMDM today, and the architectural fix path to 1.0.
 - [Quick Start](https://openmdm.dev/docs/quick-start): From nothing to an enrolled device in about 15 minutes.
 - [Kiosk Recipe](https://openmdm.dev/docs/recipes/kiosk): Lock devices to a single app, handle exit attempts, and unlock stuck devices.

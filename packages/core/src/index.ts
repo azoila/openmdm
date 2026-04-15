@@ -74,6 +74,7 @@ import type {
   GroupTreeNode,
   GroupHierarchyStats,
   Logger,
+  EnrollmentChallenge,
 } from './types';
 import {
   DeviceNotFoundError,
@@ -90,6 +91,16 @@ import { createMessageQueueManager } from './queue';
 import { createDashboardManager } from './dashboard';
 import { createPluginStorageAdapter, createMemoryPluginStorageAdapter } from './plugin-storage';
 import { createConsoleLogger, createSilentLogger } from './logger';
+import {
+  importPublicKeyFromSpki,
+  verifyEcdsaSignature,
+  canonicalEnrollmentMessage,
+  canonicalDeviceRequestMessage,
+  verifyDeviceRequest,
+  InvalidPublicKeyError,
+  PublicKeyMismatchError,
+  ChallengeInvalidError,
+} from './device-identity';
 
 // Re-export all types
 export * from './types';
@@ -98,6 +109,18 @@ export * from './agent-protocol';
 export { createWebhookManager, verifyWebhookSignature } from './webhooks';
 export type { WebhookPayload } from './webhooks';
 export { createConsoleLogger, createSilentLogger } from './logger';
+
+// Device identity (Phase 2b)
+export {
+  importPublicKeyFromSpki,
+  verifyEcdsaSignature,
+  canonicalEnrollmentMessage,
+  canonicalDeviceRequestMessage,
+  verifyDeviceRequest,
+  InvalidPublicKeyError,
+  PublicKeyMismatchError,
+  ChallengeInvalidError,
+} from './device-identity';
 
 // Re-export enterprise manager factories
 export { createTenantManager } from './tenant';
@@ -935,14 +958,105 @@ export function createMDM(config: MDMConfig): MDMInstance {
       );
     }
 
-    // Verify signature if secret is configured
-    if (enrollment?.deviceSecret) {
+    // Determine which enrollment path the request is asking for.
+    // The presence of `publicKey` is the signal: if the device
+    // supplies a public key, it is attempting the Phase 2b
+    // device-pinned-key path and must also supply a valid
+    // attestation challenge. Otherwise we fall through to the
+    // legacy HMAC path.
+    const isPinnedKeyPath = Boolean(request.publicKey);
+
+    if (!isPinnedKeyPath && enrollment?.pinnedKey?.required) {
+      throw new EnrollmentError(
+        'Pinned-key enrollment is required but the request carried no publicKey. ' +
+          'The agent must generate a Keystore keypair and submit the SPKI public key ' +
+          'alongside an ECDSA signature over the canonical enrollment message.',
+      );
+    }
+
+    // HMAC path (Phase 2a): unchanged behavior.
+    if (!isPinnedKeyPath && enrollment?.deviceSecret) {
       const isValid = verifyEnrollmentSignature(
         request,
         enrollment.deviceSecret
       );
       if (!isValid) {
         throw new EnrollmentError('Invalid enrollment signature');
+      }
+    }
+
+    // Pinned-key path (Phase 2b).
+    let challengeRecord: EnrollmentChallenge | null = null;
+    let importedPublicKey: ReturnType<typeof importPublicKeyFromSpki> | null = null;
+    if (isPinnedKeyPath) {
+      if (!request.attestationChallenge) {
+        throw new EnrollmentError(
+          'Pinned-key enrollment requires attestationChallenge. ' +
+            'Fetch a fresh challenge from /agent/enroll/challenge first.',
+        );
+      }
+      if (!database.consumeEnrollmentChallenge) {
+        throw new EnrollmentError(
+          'Pinned-key enrollment requires an adapter that implements enrollment ' +
+            'challenge storage. Upgrade to a database adapter that supports it, or ' +
+            'submit an HMAC-signed enrollment instead.',
+        );
+      }
+
+      // Parse the public key first — if it's malformed the signature
+      // cannot possibly verify and we want a specific error.
+      try {
+        importedPublicKey = importPublicKeyFromSpki(request.publicKey as string);
+      } catch (err) {
+        throw new EnrollmentError(
+          err instanceof Error
+            ? `Invalid enrollment public key: ${err.message}`
+            : 'Invalid enrollment public key',
+        );
+      }
+
+      // Atomically consume the challenge. This must happen BEFORE
+      // signature verification, otherwise two concurrent requests
+      // with the same challenge could both succeed.
+      challengeRecord = await database.consumeEnrollmentChallenge(
+        request.attestationChallenge,
+      );
+      if (!challengeRecord) {
+        throw new ChallengeInvalidError(
+          'Enrollment challenge is missing, expired, or already consumed',
+          request.attestationChallenge,
+        );
+      }
+      if (challengeRecord.expiresAt.getTime() < Date.now()) {
+        throw new ChallengeInvalidError(
+          'Enrollment challenge has expired',
+          request.attestationChallenge,
+        );
+      }
+
+      const canonical = canonicalEnrollmentMessage({
+        publicKey: request.publicKey as string,
+        model: request.model,
+        manufacturer: request.manufacturer,
+        osVersion: request.osVersion,
+        serialNumber: request.serialNumber,
+        imei: request.imei,
+        macAddress: request.macAddress,
+        androidId: request.androidId,
+        method: request.method,
+        timestamp: request.timestamp,
+        challenge: request.attestationChallenge,
+      });
+
+      const verified = verifyEcdsaSignature(
+        importedPublicKey,
+        canonical,
+        request.signature,
+      );
+      if (!verified) {
+        throw new EnrollmentError(
+          'Invalid enrollment signature (device-pinned-key path)',
+        );
       }
     }
 
@@ -971,14 +1085,40 @@ export function createMDM(config: MDMConfig): MDMInstance {
     let device = await database.findDeviceByEnrollmentId(enrollmentId);
 
     if (device) {
-      // Device re-enrolling
-      device = await database.updateDevice(device.id, {
+      // Device re-enrolling. If the device is already on the
+      // pinned-key path, the submitted public key MUST match the
+      // pinned one — otherwise we reject loudly. This is how we
+      // prevent an attacker who extracted the enrollment secret
+      // from hijacking an enrolled device's identity: without the
+      // original private key they cannot produce a valid signature,
+      // and even if they could (via a forged HMAC fallback), the
+      // pinned key still identifies the legitimate device.
+      if (isPinnedKeyPath && device.publicKey) {
+        if (device.publicKey !== request.publicKey) {
+          throw new PublicKeyMismatchError(device.id);
+        }
+      }
+
+      const updateInput: UpdateDeviceInput = {
         status: 'enrolled',
         model: request.model,
         manufacturer: request.manufacturer,
         osVersion: request.osVersion,
         lastSync: new Date(),
-      });
+      };
+
+      // Pin the key on first pinned-key enrollment for a device
+      // that originally enrolled on HMAC. This is the migration
+      // path: a device that used to sign with the shared secret
+      // can upgrade by sending its freshly-generated public key on
+      // its next enrollment, and the server will pin it from then
+      // on.
+      if (isPinnedKeyPath && !device.publicKey) {
+        updateInput.publicKey = request.publicKey;
+        updateInput.enrollmentMethod = 'pinned-key';
+      }
+
+      device = await database.updateDevice(device.id, updateInput);
     } else if (enrollment?.autoEnroll) {
       // Auto-create device
       device = await database.createDevice({
@@ -992,6 +1132,17 @@ export function createMDM(config: MDMConfig): MDMInstance {
         androidId: request.androidId,
         policyId: request.policyId || enrollment.defaultPolicyId,
       });
+
+      // Pin the public key on first enrollment for pinned-key path.
+      // `CreateDeviceInput` deliberately doesn't carry auth fields —
+      // we keep auth state a post-creation concern so legacy
+      // adapters don't have to know about it.
+      if (isPinnedKeyPath) {
+        device = await database.updateDevice(device.id, {
+          publicKey: request.publicKey,
+          enrollmentMethod: 'pinned-key',
+        });
+      }
 
       // Add to default group if configured
       if (enrollment.defaultGroupId) {
@@ -1009,6 +1160,15 @@ export function createMDM(config: MDMConfig): MDMInstance {
         macAddress: request.macAddress,
         androidId: request.androidId,
       });
+
+      // Pin the public key even for pending devices — we want to
+      // know which key originally enrolled once an admin approves.
+      if (isPinnedKeyPath) {
+        device = await database.updateDevice(device.id, {
+          publicKey: request.publicKey,
+          enrollmentMethod: 'pinned-key',
+        });
+      }
       // Status remains 'pending'
     } else {
       throw new EnrollmentError(

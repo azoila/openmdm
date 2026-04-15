@@ -1,6 +1,7 @@
 {
   "title": "Proposals",
   "pages": [
-    "tenant-rbac-audit"
+    "tenant-rbac-audit",
+    "phase-2b-rollout"
   ]
 }
