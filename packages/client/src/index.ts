@@ -385,7 +385,7 @@ async function generateHMAC(message: string, secret: string): Promise<string> {
 /**
  * Generate enrollment signature
  */
-async function generateEnrollmentSignature(
+export async function generateEnrollmentSignature(
   request: EnrollmentRequest,
   timestamp: string,
   secret: string
@@ -963,4 +963,4 @@ export function deserializeState(data: string): MDMClientState {
 // Re-exports
 // ============================================
 
-export { generateHMAC, generateEnrollmentSignature };
+export { generateHMAC };

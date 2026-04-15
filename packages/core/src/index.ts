@@ -1328,7 +1328,7 @@ function createStubPushAdapter(): PushAdapter {
 // Utility Functions
 // ============================================
 
-function verifyEnrollmentSignature(
+export function verifyEnrollmentSignature(
   request: EnrollmentRequest,
   secret: string
 ): boolean {
@@ -1338,11 +1338,21 @@ function verifyEnrollmentSignature(
     return false;
   }
 
-  // Reconstruct the message that was signed
-  // Format: identifier:timestamp
-  const identifier =
-    data.macAddress || data.serialNumber || data.imei || data.androidId || '';
-  const message = `${identifier}:${data.timestamp}`;
+  // Reconstruct the message that was signed. This must stay in lockstep with
+  // @openmdm/client's generateEnrollmentSignature — any change here is a wire
+  // break and must land in both places. A contract test in core/tests guards
+  // the format and will fail on divergence.
+  const message = [
+    data.model,
+    data.manufacturer,
+    data.osVersion,
+    data.serialNumber || '',
+    data.imei || '',
+    data.macAddress || '',
+    data.androidId || '',
+    data.method,
+    data.timestamp,
+  ].join('|');
 
   const expectedSignature = createHmac('sha256', secret)
     .update(message)
