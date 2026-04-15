@@ -5,8 +5,8 @@
   "type": "module",
   "description": "End-to-end integration tests that run against real infrastructure (Postgres from docker-compose.test.yml). Not published.",
   "scripts": {
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test:e2e": "vitest run",
+    "test:e2e:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
