@@ -18,9 +18,10 @@
 
 </div>
 
-> [!CAUTION]
-> **This project is under active development and is NOT ready for production use.**
-> APIs may change without notice. Use at your own risk. We welcome contributions and feedback!
+> [!NOTE]
+> **OpenMDM is pre-1.0.** The core APIs are working and the packages are published to npm, but
+> minor versions may still introduce breaking changes before 1.0. Pin exact versions in production
+> and review the [CHANGELOG](./CHANGELOG.md) before upgrading. Contributions and feedback welcome.
 
 ## Why OpenMDM?
 
@@ -66,7 +67,7 @@ await mdm.devices.sendCommand(deviceId, { type: 'reboot' });
 ## Features
 
 - **Embeddable** - Works within your existing application, not as a separate service
-- **Framework Agnostic** - Use with Express, Hono, Fastify, Next.js, or any HTTP framework
+- **HTTP Adapter** - First-class Hono adapter with the full REST surface (Express, Fastify and Next.js adapters are on the roadmap)
 - **Database Agnostic** - Bring your own database with Drizzle, Prisma, or raw SQL
 - **Push Notifications** - FCM, MQTT, and WebSocket support
 - **S3 Storage** - Presigned URLs for APK uploads (AWS S3, MinIO, DigitalOcean Spaces)
@@ -176,10 +177,12 @@ mdm.on('device.enrolled', async (event) => {
 });
 ```
 
-### 4. Framework Integration
+### 4. Mount the HTTP Adapter
 
-<details>
-<summary><b>Hono</b></summary>
+OpenMDM ships with a first-class [Hono](https://hono.dev) adapter that exposes the full REST
+surface (enrollment, devices, policies, applications, groups, commands, events, agent
+wire-protocol). Hono runs on Node, Bun, Deno, Cloudflare Workers, Vercel, and more — so the same
+adapter works across runtimes.
 
 ```typescript
 import { Hono } from 'hono';
@@ -189,46 +192,9 @@ const app = new Hono();
 app.route('/mdm', honoAdapter(mdm));
 ```
 
-</details>
-
-<details>
-<summary><b>Express</b></summary>
-
-```typescript
-import express from 'express';
-import { expressAdapter } from '@openmdm/express';
-
-const app = express();
-app.use('/mdm', expressAdapter(mdm));
-```
-
-</details>
-
-<details>
-<summary><b>Fastify</b></summary>
-
-```typescript
-import Fastify from 'fastify';
-import { fastifyPlugin } from '@openmdm/fastify';
-
-const app = Fastify();
-app.register(fastifyPlugin(mdm), { prefix: '/mdm' });
-```
-
-</details>
-
-<details>
-<summary><b>Next.js (App Router)</b></summary>
-
-```typescript
-// app/api/mdm/[...path]/route.ts
-import { nextjsHandler } from '@openmdm/nextjs';
-import { mdm } from '@/lib/mdm';
-
-export const { GET, POST, PUT, DELETE } = nextjsHandler(mdm);
-```
-
-</details>
+> **Using Express, Fastify, or Next.js?** Native adapters are on the roadmap for 1.0. In the
+> meantime, the `@openmdm/core` instance exposes all MDM operations as plain functions, so you
+> can wire your own routes against any framework.
 
 ## Architecture
 

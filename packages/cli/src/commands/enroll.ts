@@ -18,6 +18,13 @@ interface TokenOptions {
 
 export async function generateQR(options: QROptions): Promise<void> {
   console.log(chalk.blue('\\n🔗 Generate Enrollment QR Code\\n'));
+  console.log(
+    chalk.yellow(
+      '⚠  This command currently generates an unsigned, non-persisted enrollment payload.\\n' +
+        '   HMAC-signed and server-persisted enrollment tokens will land in Phase 2b\\n' +
+        '   (hardware-rooted identity). For now, use this only for development/testing.\\n'
+    )
+  );
 
   const serverUrl = process.env.SERVER_URL || 'https://mdm.example.com';
   const deviceSecret = process.env.DEVICE_SECRET;
@@ -95,6 +102,12 @@ export async function generateQR(options: QROptions): Promise<void> {
 
 export async function generateToken(options: TokenOptions): Promise<void> {
   console.log(chalk.blue('\\n🔑 Generate Enrollment Token\\n'));
+  console.log(
+    chalk.yellow(
+      '⚠  This command currently generates an unsigned, non-persisted token.\\n' +
+        '   HMAC-signed and server-persisted tokens will land in Phase 2b.\\n'
+    )
+  );
 
   const serverUrl = process.env.SERVER_URL || 'https://mdm.example.com';
   const expiresHours = parseInt(options.expires || '24');

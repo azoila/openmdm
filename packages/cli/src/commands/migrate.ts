@@ -201,11 +201,13 @@ DROP TYPE IF EXISTS mdm_device_status;
 export async function runMigrations(options: MigrateOptions): Promise<void> {
   console.log(chalk.blue('\\n📦 OpenMDM Database Migration\\n'));
 
-  console.log(chalk.yellow('⚠️  Note: This command is deprecated.'));
-  console.log(chalk.yellow('   Use the new generate command instead:'));
+  console.log(chalk.yellow('⚠  This command does not execute migrations against your database.'));
+  console.log(chalk.yellow('   It prints legacy SQL for reference only. Use the supported workflow:'));
+  console.log('');
   console.log(chalk.cyan('     npx openmdm generate --adapter drizzle --provider pg'));
   console.log(chalk.cyan('     npx drizzle-kit generate'));
-  console.log(chalk.cyan('     npx drizzle-kit migrate\\n'));
+  console.log(chalk.cyan('     npx drizzle-kit migrate'));
+  console.log('');
 
   const databaseUrl = process.env.DATABASE_URL;
 
