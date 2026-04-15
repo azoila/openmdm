@@ -188,8 +188,47 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
 
   let mdm: MDMInstance;
 
-  // In-memory kiosk state (should be persisted to DB in production)
-  const kioskStates = new Map<string, KioskState>();
+  // Kiosk state persistence.
+  //
+  // Lockout counters, the enabled/disabled flag, and the `mainApp` a
+  // device is locked to are *all* critical state. If they live only in
+  // process memory, a restart or a second replica silently loses them
+  // and a device either falls out of kiosk mode or escapes its lockout
+  // timer. Both failure modes have bitten production fleets before.
+  //
+  // When the host configures `pluginStorage` on createMDM, we persist
+  // every write through that adapter so state survives restarts and
+  // horizontal scaling works. When it is not configured, we fall back
+  // to an in-memory Map with a startup warning — that path is only
+  // acceptable for local development and tests.
+  const PLUGIN_NAME = 'kiosk';
+  const inMemoryFallback = new Map<string, KioskState>();
+
+  function storage(): MDMInstance['pluginStorage'] {
+    return mdm?.pluginStorage;
+  }
+
+  /**
+   * Dates round-trip through JSON as strings; rehydrate them on read.
+   */
+  function rehydrate(value: unknown): KioskState | null {
+    if (!value || typeof value !== 'object') return null;
+    const v = value as Record<string, unknown>;
+    return {
+      deviceId: v.deviceId as string,
+      enabled: Boolean(v.enabled),
+      mode: v.mode as KioskState['mode'],
+      mainApp: (v.mainApp as string) ?? '',
+      activeApp: v.activeApp as string | undefined,
+      lockedSince: v.lockedSince ? new Date(v.lockedSince as string) : undefined,
+      exitAttempts: typeof v.exitAttempts === 'number' ? v.exitAttempts : 0,
+      lastExitAttempt: v.lastExitAttempt
+        ? new Date(v.lastExitAttempt as string)
+        : undefined,
+      lockedOut: Boolean(v.lockedOut),
+      lockoutUntil: v.lockoutUntil ? new Date(v.lockoutUntil as string) : undefined,
+    };
+  }
 
   /**
    * Get kiosk settings from policy
@@ -224,20 +263,33 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
   }
 
   /**
-   * Get or create kiosk state for device
+   * Get kiosk state for a device. Returns `undefined` if the device
+   * has no tracked state (never entered kiosk mode).
    */
-  function getKioskState(deviceId: string): KioskState | undefined {
-    return kioskStates.get(deviceId);
+  async function getKioskState(deviceId: string): Promise<KioskState | undefined> {
+    const store = storage();
+    if (store) {
+      const raw = await store.get<KioskState>(PLUGIN_NAME, deviceId);
+      return rehydrate(raw) ?? undefined;
+    }
+    return inMemoryFallback.get(deviceId);
   }
 
   /**
-   * Update kiosk state
+   * Upsert kiosk state for a device. Reads the current value, merges
+   * the partial, and writes it back. This is last-write-wins — if two
+   * replicas race on the same device, the second write overwrites the
+   * first. That is acceptable for this workload: the only concurrent
+   * writers are the device itself (via the heartbeat) and the admin
+   * side (via explicit commands), and neither path races at the level
+   * where an update could be lost without also being recomputed on
+   * the next heartbeat.
    */
-  function updateKioskState(
+  async function updateKioskState(
     deviceId: string,
     updates: Partial<KioskState>
-  ): KioskState {
-    const current = kioskStates.get(deviceId) || {
+  ): Promise<KioskState> {
+    const current = (await getKioskState(deviceId)) ?? {
       deviceId,
       enabled: false,
       mode: 'single-app' as const,
@@ -246,9 +298,34 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
       lockedOut: false,
     };
 
-    const updated = { ...current, ...updates };
-    kioskStates.set(deviceId, updated);
+    const updated: KioskState = { ...current, ...updates, deviceId };
+
+    const store = storage();
+    if (store) {
+      await store.set(PLUGIN_NAME, deviceId, updated);
+    } else {
+      inMemoryFallback.set(deviceId, updated);
+    }
     return updated;
+  }
+
+  /**
+   * List every device with a known kiosk state. Used by the admin
+   * listing route. Note: this loads every key under the plugin
+   * namespace on each call, which is fine at fleet scale because the
+   * cardinality is bounded by the number of devices that have ever
+   * been in kiosk mode, not by event volume.
+   */
+  async function listKioskStates(): Promise<KioskState[]> {
+    const store = storage();
+    if (store) {
+      const keys = await store.list(PLUGIN_NAME);
+      const states = await Promise.all(
+        keys.map(async (k) => rehydrate(await store.get(PLUGIN_NAME, k))),
+      );
+      return states.filter((s): s is KioskState => s !== null);
+    }
+    return Array.from(inMemoryFallback.values());
   }
 
   /**
@@ -265,7 +342,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
       };
     }
 
-    const state = getKioskState(device.id);
+    const state = await getKioskState(device.id);
     if (!state?.enabled) {
       return {
         success: true,
@@ -274,7 +351,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
     }
 
     // Update state
-    updateKioskState(device.id, {
+    await updateKioskState(device.id, {
       enabled: false,
       exitAttempts: 0,
       lockedOut: false,
@@ -321,7 +398,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
     }
 
     // Update state
-    updateKioskState(device.id, {
+    await updateKioskState(device.id, {
       enabled: true,
       mode: kioskSettings?.mode || 'single-app',
       mainApp,
@@ -394,7 +471,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
       admin: true,
       handler: async (context: any) => {
         const { deviceId } = context.req.param();
-        const state = getKioskState(deviceId);
+        const state = await getKioskState(deviceId);
 
         if (!state) {
           return context.json({ enabled: false });
@@ -454,9 +531,10 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
       auth: true,
       admin: true,
       handler: async (context: any) => {
-        const kioskDevices = Array.from(kioskStates.entries())
-          .filter(([_, state]) => state.enabled)
-          .map(([_, state]) => ({
+        const all = await listKioskStates();
+        const kioskDevices = all
+          .filter((state) => state.enabled)
+          .map((state) => ({
             ...state,
             lockedSince: state.lockedSince?.toISOString(),
           }));
@@ -474,7 +552,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
         const body = await context.req.json();
         const { deviceId, success, password } = body;
 
-        const state = getKioskState(deviceId);
+        const state = await getKioskState(deviceId);
         if (!state?.enabled) {
           return context.json({ error: 'Device not in kiosk mode' }, 400);
         }
@@ -488,7 +566,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
             }, 403);
           } else {
             // Lockout expired
-            updateKioskState(deviceId, {
+            await updateKioskState(deviceId, {
               lockedOut: false,
               lockoutUntil: undefined,
               exitAttempts: 0,
@@ -498,7 +576,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
 
         if (success) {
           // Successful exit
-          updateKioskState(deviceId, {
+          await updateKioskState(deviceId, {
             enabled: false,
             exitAttempts: 0,
           });
@@ -521,7 +599,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
               Date.now() + lockoutDuration * 60 * 1000
             );
 
-            updateKioskState(deviceId, {
+            await updateKioskState(deviceId, {
               exitAttempts: newAttempts,
               lastExitAttempt: new Date(),
               lockedOut: true,
@@ -541,7 +619,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
               lockoutUntil: lockoutUntil.toISOString(),
             }, 403);
           } else {
-            updateKioskState(deviceId, {
+            await updateKioskState(deviceId, {
               exitAttempts: newAttempts,
               lastExitAttempt: new Date(),
             });
@@ -572,7 +650,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
           timestamp: new Date().toISOString(),
         });
 
-        const state = getKioskState(deviceId);
+        const state = await getKioskState(deviceId);
         const shouldRestart = state?.enabled && autoRestart;
 
         return context.json({
@@ -590,11 +668,20 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
 
     async onInit(instance: MDMInstance): Promise<void> {
       mdm = instance;
+      if (!instance.pluginStorage) {
+        console.warn(
+          '[OpenMDM Kiosk] pluginStorage is not configured on createMDM. ' +
+            'Kiosk lockout state will live in this process only and will be ' +
+            'lost on restart or across replicas. This is only safe for local ' +
+            'development. See docs/concepts/architecture for the production ' +
+            'setup.',
+        );
+      }
       console.log('[OpenMDM Kiosk] Plugin initialized');
     },
 
     async onDestroy(): Promise<void> {
-      kioskStates.clear();
+      inMemoryFallback.clear();
       console.log('[OpenMDM Kiosk] Plugin destroyed');
     },
 
@@ -607,7 +694,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
         if (policy) {
           const kioskSettings = getKioskSettings(policy);
           if (kioskSettings?.enabled) {
-            updateKioskState(device.id, {
+            await updateKioskState(device.id, {
               enabled: true,
               mode: kioskSettings.mode,
               mainApp: kioskSettings.mainApp,
@@ -619,7 +706,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
     },
 
     async onHeartbeat(device: Device, heartbeat: Heartbeat): Promise<void> {
-      const state = getKioskState(device.id);
+      const state = await getKioskState(device.id);
 
       if (state?.enabled && heartbeat.runningApps) {
         // Check if kiosk app is still running

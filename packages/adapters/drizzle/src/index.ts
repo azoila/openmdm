@@ -65,6 +65,7 @@ import type {
   mdmPushTokens,
   mdmAppVersions,
   mdmRollbacks,
+  mdmPluginStorage,
 } from './postgres';
 
 // Type for Drizzle database instance
@@ -92,6 +93,7 @@ export interface DrizzleAdapterOptions {
     pushTokens: typeof mdmPushTokens;
     appVersions?: typeof mdmAppVersions;
     rollbacks?: typeof mdmRollbacks;
+    pluginStorage?: typeof mdmPluginStorage;
   };
 }
 
@@ -114,6 +116,7 @@ export function drizzleAdapter(
     pushTokens,
     appVersions,
     rollbacks,
+    pluginStorage,
   } = tables;
 
   // Helper to generate IDs
@@ -1130,6 +1133,101 @@ export function drizzleAdapter(
 
             const result = await query.orderBy(desc(rollbacks.createdAt));
             return result.map(toAppRollback);
+          },
+        }
+      : {}),
+
+    // ============================================
+    // Plugin Storage
+    // ============================================
+    //
+    // These methods are only wired when the caller passes a
+    // `pluginStorage` table. Plugins that need cross-instance
+    // persistence (e.g. the kiosk plugin's lockout counters) check
+    // for `mdm.pluginStorage` and fall back to in-memory state when
+    // it is not configured.
+
+    ...(pluginStorage
+      ? {
+          async getPluginValue(
+            pluginName: string,
+            key: string
+          ): Promise<unknown> {
+            const rows = await (db as any)
+              .select()
+              .from(pluginStorage)
+              .where(
+                and(
+                  eq(pluginStorage.pluginName, pluginName),
+                  eq(pluginStorage.key, key)
+                )
+              )
+              .limit(1);
+            if (rows.length === 0) return null;
+            return rows[0].value;
+          },
+
+          async setPluginValue(
+            pluginName: string,
+            key: string,
+            value: unknown
+          ): Promise<void> {
+            // Postgres upsert: on conflict (plugin_name, key) update value + updated_at.
+            // This keeps writes idempotent and last-writer-wins, which matches
+            // the semantics the plugin-storage interface promises.
+            await (db as any)
+              .insert(pluginStorage)
+              .values({
+                pluginName,
+                key,
+                value,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              })
+              .onConflictDoUpdate({
+                target: [pluginStorage.pluginName, pluginStorage.key],
+                set: {
+                  value,
+                  updatedAt: new Date(),
+                },
+              });
+          },
+
+          async deletePluginValue(
+            pluginName: string,
+            key: string
+          ): Promise<void> {
+            await (db as any)
+              .delete(pluginStorage)
+              .where(
+                and(
+                  eq(pluginStorage.pluginName, pluginName),
+                  eq(pluginStorage.key, key)
+                )
+              );
+          },
+
+          async listPluginKeys(
+            pluginName: string,
+            prefix?: string
+          ): Promise<string[]> {
+            const whereExpr = prefix
+              ? and(
+                  eq(pluginStorage.pluginName, pluginName),
+                  like(pluginStorage.key, `${prefix}%`)
+                )
+              : eq(pluginStorage.pluginName, pluginName);
+            const rows = await (db as any)
+              .select({ key: pluginStorage.key })
+              .from(pluginStorage)
+              .where(whereExpr);
+            return rows.map((r: { key: string }) => r.key);
+          },
+
+          async clearPluginData(pluginName: string): Promise<void> {
+            await (db as any)
+              .delete(pluginStorage)
+              .where(eq(pluginStorage.pluginName, pluginName));
           },
         }
       : {}),

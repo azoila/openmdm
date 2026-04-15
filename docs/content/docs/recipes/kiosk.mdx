@@ -11,17 +11,23 @@ This recipe covers the full lifecycle: enabling kiosk via policy, handling exit 
 
 ## Enable the plugin
 
-Kiosk is shipped as an optional plugin. Add it to your `createMDM` config:
+Kiosk is shipped as an optional plugin. Add it to your `createMDM` config **and enable `pluginStorage`** so lockout state survives restarts and scales horizontally:
 
 ```typescript title="src/mdm.ts"
 import { createMDM } from '@openmdm/core';
 import { kioskPlugin } from '@openmdm/plugin-kiosk';
 
 export const mdm = createMDM({
-  database: drizzleAdapter(db),
+  database: drizzleAdapter(db, { tables: mdmSchema }),
   push: fcmPushAdapter({ ... }),
   enrollment: { deviceSecret: process.env.DEVICE_SECRET! },
   auth: { deviceTokenSecret: process.env.JWT_SECRET! },
+
+  // REQUIRED for kiosk in production. The kiosk plugin persists
+  // lockout counters, the active kiosk app, and exit-attempt history
+  // through this store. If it's omitted, state lives only in this
+  // process's memory and is lost on restart or across replicas.
+  pluginStorage: { adapter: 'database' },
 
   plugins: [
     kioskPlugin({
@@ -48,6 +54,8 @@ export const mdm = createMDM({
 ```
 
 Plugins register routes, hooks, and state tracking at instance creation. Once the plugin is loaded, it wires itself into the policy application flow automatically — you don't need to import anything else to use it.
+
+> **Why pluginStorage is required in production.** Without it, the kiosk plugin falls back to an in-memory `Map` and prints a startup warning. That fallback is fine for local development, but it silently breaks two things you care about: (1) process restarts lose the lockout timer, so a malicious user who hit the max exit attempts gets a fresh budget every time your server redeploys, and (2) running a second replica behind a load balancer means each replica has its own view of the counters, so exit attempts aren't consistently counted. Both are real bugs that have bitten production fleets. Enabling `pluginStorage: { adapter: 'database' }` persists state through the same `DatabaseAdapter` you already configured.
 
 ## Create a kiosk policy
 

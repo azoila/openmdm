@@ -120,7 +120,7 @@ importers:
     devDependencies:
       drizzle-orm:
         specifier: ^0.38.0
-        version: 0.38.4(@opentelemetry/api@1.9.0)(@types/react@19.2.8)(react@19.2.3)
+        version: 0.38.4(@opentelemetry/api@1.9.0)(@types/react@19.2.8)(postgres@3.4.9)(react@19.2.3)
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(jiti@2.6.1)(postcss@8.5.6)(tsx@4.21.0)(typescript@5.9.3)
@@ -297,6 +297,28 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+
+  tests/e2e:
+    dependencies:
+      '@openmdm/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@openmdm/drizzle-adapter':
+        specifier: workspace:*
+        version: link:../../packages/adapters/drizzle
+      drizzle-orm:
+        specifier: ^0.38.0
+        version: 0.38.4(@opentelemetry/api@1.9.0)(@types/react@19.2.8)(postgres@3.4.9)(react@19.2.3)
+      postgres:
+        specifier: ^3.4.0
+        version: 3.4.9
+    devDependencies:
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.0.0
+        version: 2.1.9(@types/node@22.19.7)(lightningcss@1.30.2)
 
 packages:
 
@@ -4034,6 +4056,10 @@ packages:
     resolution: {integrity: sha512-3Ybi1tAuwAP9s0r1UQ2J4n5Y0G05bJkpUIO0/bI9MhwmD70S5aTWbXGBwxHrelT+XM1k6dM0pk+SwNkpTRN7Pg==}
     engines: {node: ^10 || ^12 || >=14}
 
+  postgres@3.4.9:
+    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
+    engines: {node: '>=12'}
+
   prettier@2.8.8:
     resolution: {integrity: sha512-tdN8qQGvNjw4CHbY+XXk0JgCXn9QiF21a55rBe5LJAU+kDyC4WQn4+awm2Xfk2lQMk5fKup9XgzTZtGkjBdP9Q==}
     engines: {node: '>=10.13.0'}
@@ -7509,10 +7535,11 @@ snapshots:
 
   dotenv@8.6.0: {}
 
-  drizzle-orm@0.38.4(@opentelemetry/api@1.9.0)(@types/react@19.2.8)(react@19.2.3):
+  drizzle-orm@0.38.4(@opentelemetry/api@1.9.0)(@types/react@19.2.8)(postgres@3.4.9)(react@19.2.3):
     optionalDependencies:
       '@opentelemetry/api': 1.9.0
       '@types/react': 19.2.8
+      postgres: 3.4.9
       react: 19.2.3
 
   dunder-proto@1.0.1:
@@ -9181,6 +9208,8 @@ snapshots:
       nanoid: 3.3.11
       picocolors: 1.1.1
       source-map-js: 1.2.1
+
+  postgres@3.4.9: {}
 
   prettier@2.8.8: {}
 

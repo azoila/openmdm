@@ -1,0 +1,22 @@
+{
+  "name": "@openmdm/tests-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end integration tests that run against real infrastructure (Postgres from docker-compose.test.yml). Not published.",
+  "scripts": {
+    "test:e2e": "vitest run",
+    "test:e2e:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openmdm/core": "workspace:*",
+    "@openmdm/drizzle-adapter": "workspace:*",
+    "drizzle-orm": "^0.38.0",
+    "postgres": "^3.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
