@@ -1,84 +1,80 @@
 ---
 title: Introduction
-description: OpenMDM is a modern, embeddable MDM SDK for Android devices.
+description: OpenMDM is an embeddable Mobile Device Management SDK you drop into your existing TypeScript application.
 ---
 
 # Introduction
 
-OpenMDM is a modern, open-source Mobile Device Management (MDM) SDK designed for developers who need enterprise-grade device management capabilities without the complexity of traditional MDM solutions.
+OpenMDM is a Mobile Device Management (MDM) library you **embed in your own backend**, not a separate server you deploy and integrate with. You add a few packages, point the SDK at your existing database, mount a Hono router at `/mdm`, and your app can now enroll, command, and monitor Android devices.
 
-## What is OpenMDM?
+> **This is pre-1.0 software.** The core APIs work and the packages are published to npm, but minor versions may still break the wire protocol before 1.0. Pin exact versions in production.
 
-OpenMDM provides a complete toolkit for managing Android devices at scale. It's designed to be:
+## Who this is for
 
-- **Embeddable**: Integrate MDM capabilities directly into your existing applications
-- **Developer-friendly**: Clean TypeScript APIs with comprehensive documentation
-- **Flexible**: Use only the features you need with a modular plugin architecture
-- **Open Source**: MIT licensed and community-driven
+- You have an existing Node.js / TypeScript backend (Hono today; Express/Fastify/Next.js adapters are on the roadmap).
+- You need to manage fleet-scale Android devices — kiosk terminals, logistics handhelds, retail POS, field service tablets — and you want that data in the same database your app already uses.
+- You do **not** want to run a separate MDM server, integrate with its API, and reconcile two user models.
 
-## Key Features
+If that describes you, OpenMDM is the shortest path from "our app needs device management" to "our app has device management, deployed next to the existing app code."
 
-### Device Enrollment
+## Who this is NOT for
 
-Easily enroll devices using QR codes, NFC, or zero-touch enrollment. OpenMDM supports multiple enrollment methods to fit your deployment scenario.
+- **Consumer BYOD scenarios.** OpenMDM targets company-owned devices in Device Owner mode. It can do Profile Owner too, but the docs and examples here focus on the Device Owner path.
+- **iOS.** OpenMDM is Android-only. Apple's MDM protocol is a different animal and is not on the roadmap.
+- **Regulated zero-trust environments that demand a hardware-rooted identity today.** Hardware-rooted enrollment (Keystore-attested) lands in Phase 2b; until then, enrollment is HMAC-signed but not hardware-attested.
 
-### Policy Management
+## What the packages actually do
 
-Define and enforce device policies including:
+OpenMDM is a monorepo of small packages. You compose the ones you need:
 
-- App allowlists and blocklists
-- Network and WiFi configuration
-- Security requirements (passwords, encryption)
-- System settings restrictions
+| Package | What it is |
+|---|---|
+| `@openmdm/core` | The SDK itself: device/policy/command managers, event bus, enrollment, webhook delivery. Framework- and database-agnostic — it takes adapters for everything it touches. |
+| `@openmdm/drizzle-adapter` | `DatabaseAdapter` implementation over Drizzle ORM. Supports Postgres, MySQL, and SQLite via the standard Drizzle dialects. |
+| `@openmdm/hono` | HTTP routes. Mounts all `/agent/*` and admin endpoints onto any Hono app. Runs on Node, Bun, Deno, Workers, Vercel. |
+| `@openmdm/push-fcm` | Firebase Cloud Messaging push adapter. Real Firebase Admin SDK, data-only messages, token invalidation. |
+| `@openmdm/push-mqtt` | MQTT push adapter for air-gapped or private fleets without Google Play Services. |
+| `@openmdm/storage-s3` | Presigned URL issuer for APK uploads. Works with AWS S3, MinIO, DigitalOcean Spaces. |
+| `@openmdm/plugin-kiosk` | Kiosk mode lifecycle: enter/exit, lockout on exit-password failures. |
+| `@openmdm/plugin-geofence` | Circular + polygon zones with dwell time and scheduling. |
+| `@openmdm/client` | Device-side SDK consumed by the Android agent. You usually don't touch this unless you're building a custom agent. |
+| `@openmdm/cli` | Admin CLI: `openmdm device list`, `openmdm policy apply`, `openmdm stats`. Talks to your real MDM instance via a config file. |
 
-### Remote Commands
+The minimum viable setup is `core` + `drizzle-adapter` + `hono` + one push provider. Everything else is additive.
 
-Execute commands on enrolled devices:
+## How it fits into your app
 
-- Lock and unlock devices
-- Wipe device data
-- Install and uninstall applications
-- Reboot devices
+OpenMDM does not own a process. It is a library your server already imports:
 
-### Kiosk Mode
-
-Lock devices to specific applications for dedicated-use scenarios like:
-
-- Retail point-of-sale
-- Digital signage
-- Field service applications
-- Educational devices
-
-## Architecture
-
-OpenMDM follows a modular architecture with three main components:
-
-1. **Core SDK** (`@openmdm/core`): The main server-side SDK that handles device management logic
-2. **Storage Adapters**: Pluggable storage backends (SQLite, PostgreSQL, etc.)
-3. **Push Providers**: Integration with push notification services (FCM, HMS)
-
-## Quick Start
-
-```bash
-npm install @openmdm/core @openmdm/storage-sqlite @openmdm/push-fcm
+```
+┌────────────────── Your backend (Hono, Node) ───────────────────┐
+│                                                                │
+│   Your routes         OpenMDM routes        Your jobs          │
+│   /api/*              /mdm/* (mounted)      cron, queues       │
+│       │                     │                   │              │
+│       └─────────────┬───────┴─────┬─────────────┘              │
+│                     ▼             ▼                            │
+│             createMDM({ database, push, plugins })             │
+│                     │             │                            │
+│                     ▼             ▼                            │
+│             Your Postgres    FCM / MQTT                        │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+                             ▲
+                             │ HTTPS + FCM
+                             ▼
+                      ┌─────────────┐
+                      │  Android    │  (openmdm-android agent,
+                      │   device    │   separate repo)
+                      └─────────────┘
 ```
 
-```typescript
-import { createMDMServer } from '@openmdm/core';
-import { sqliteStorage } from '@openmdm/storage-sqlite';
-import { fcmPush } from '@openmdm/push-fcm';
+A single `createMDM()` call returns an `MDMInstance` with managers (`devices`, `policies`, `commands`, `apps`, `groups`) and an event bus. Your own code calls those managers directly — same process, same transaction boundary, same database.
 
-const mdm = createMDMServer({
-  storage: sqliteStorage({ filename: './mdm.db' }),
-  push: fcmPush({ projectId: 'your-project-id' }),
-});
+## Where to go next
 
-// Start managing devices
-const devices = await mdm.devices.list();
-```
-
-## Next Steps
-
-- [Installation](/docs/installation) - Set up OpenMDM in your project
-- [Quick Start](/docs/quick-start) - Get up and running in minutes
-- [Core Concepts](/docs/concepts) - Understand how OpenMDM works
+- **[Installation](/docs/installation)** — the real packages, the real config shape.
+- **[Quick Start](/docs/quick-start)** — end-to-end working example against Hono + Postgres + FCM.
+- **[Architecture](/docs/concepts/architecture)** — the control flow for enrollment, heartbeats, and commands. Read this before making architectural decisions.
+- **[Commands vs Policies](/docs/concepts/commands-and-policies)** — the single most confusing distinction for newcomers. Read before writing any policy.
+- **[Agent Wire Protocol](/docs/concepts/agent-protocol)** — why `/agent/*` responses use an envelope and how v1/v2 coexist during rollout.

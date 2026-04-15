@@ -3,6 +3,10 @@
   "pages": [
     "introduction",
     "installation",
-    "quick-start"
+    "quick-start",
+    "---Concepts---",
+    "concepts",
+    "---Recipes---",
+    "recipes"
   ]
 }

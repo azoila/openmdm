@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "fumadocs-mdx && next build",
-    "dev": "fumadocs-mdx && next dev",
+    "build": "fumadocs-mdx && node scripts/generate-llms-txt.mjs && next build",
+    "dev": "fumadocs-mdx && node scripts/generate-llms-txt.mjs && next dev",
+    "generate:llms": "node scripts/generate-llms-txt.mjs",
     "start": "next start",
     "postinstall": "fumadocs-mdx"
   },

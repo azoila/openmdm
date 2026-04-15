@@ -1,0 +1,127 @@
+---
+title: Agent Wire Protocol
+description: Why /agent/* responses use an envelope, and how v1 and v2 clients coexist during rollout.
+---
+
+# Agent Wire Protocol
+
+The `/agent/*` endpoints — everything an enrolled device calls — use a different response shape than the admin endpoints. This page explains why, and what you need to know if you're building a custom agent or debugging a fleet bug.
+
+## The bug this protocol fixes
+
+In OpenMDM's first iteration, agent endpoints returned either a bare JSON body on success or raised an `HTTPException(401|404|5xx)` on failure. The agent then had to decide what to do based on the HTTP status code.
+
+The agent's logic looked, roughly, like this:
+
+```kotlin
+when (response.code) {
+    200 -> ok(response.body)
+    401 -> reEnroll()       // "my token is bad → wipe local state"
+    404 -> reEnroll()       // "server lost me → wipe local state"
+    else -> retry()
+}
+```
+
+That worked for the happy path. In production it broke, in the exact way you'd expect: a **transient** 401 from a Lambda cold start or a **transient** 404 from an eventual-consistency window was indistinguishable from a **real** "your enrollment is gone" response. The agent would wipe its local state and try to re-enroll — and since its enrollment secret was still valid, it would succeed, with a fresh `deviceId` and empty history.
+
+The result was a fleet of devices that looked fine on metrics but had lost their IDs, policies, and command history every time a backend blip happened. We called it the auto-unenroll bug, and it was the one production incident that led directly to this whole protocol redesign.
+
+## The fix: one decision field per response
+
+Under protocol v2, every agent endpoint replies with HTTP 200 and a body of shape `AgentResponse`:
+
+```typescript
+type AgentAction = 'none' | 'retry' | 'reauth' | 'unenroll';
+
+type AgentResponse<T = unknown> =
+  | { ok: true;  action: 'none';                         data: T }
+  | { ok: false; action: 'retry' | 'reauth' | 'unenroll'; message?: string };
+```
+
+The agent only reads `action`. There is **exactly one handler per action** on the device side:
+
+- **`none`** → happy path. Consume `data` and continue.
+- **`retry`** → transient problem. Back off and retry later. **Do not touch local state.**
+- **`reauth`** → access token is no longer valid. Run the refresh flow. **Do not wipe enrollment.**
+- **`unenroll`** → server-side record for this device is gone or blocked, and the credentials will never work again. Stop making requests. In Phase 2b this will be softened: the agent will attempt a hardware-identity-based rebind before treating this as terminal.
+
+The critical property: **a bad token produces `reauth`, never `unenroll`**. Test coverage in `packages/adapters/hono/tests/device-auth.test.ts` locks this invariant in, because it's the exact thing that caused the original incident.
+
+## The header: opt-in, not opt-out
+
+Agents indicate they want v2 responses by sending:
+
+```http
+X-Openmdm-Protocol: 2
+```
+
+on every request. When the header is absent or anything other than the literal string `"2"`, the server falls back to v1 behavior: bare JSON on success, `HTTPException` on failure. This is **deliberate**. During a fleet rollout you have:
+
+- New agents that speak v2 and send the header.
+- Old agents that don't know about the header.
+- A server that has to talk to both.
+
+Without the opt-in, you'd need to cut over the entire fleet in one deploy. With the opt-in, you ship the new server first (which can talk both), then update agents at your own pace. When the last v1 device is retired, you remove the fallback branch in a future major version.
+
+> Header parsing is **strict equality with the string `"2"`**. `" 2"`, `"2.0"`, `"true"`, `"v2"`, `3` — all fall back to v1. This is the kind of thing where fuzzy matching would create subtle rollout bugs, so we don't do it.
+
+## The v1 → v2 status mapping
+
+Because v1 agents expect HTTP status codes, the server needs to pick one when replying to v1 in a failure case. The mapping is:
+
+| v2 `action` | v1 HTTP status | Meaning |
+|---|---|---|
+| `reauth` | `401 Unauthorized` | The device's access token was rejected. |
+| `unenroll` | `404 Not Found` | The server has no record of this device id. |
+| `retry` | `503 Service Unavailable` | Transient server-side issue. |
+
+A v1 agent seeing these statuses behaves exactly as it did before the envelope existed — which is important, because that's the behavior its code was written against.
+
+## Using the helpers in custom endpoints
+
+If you're adding your own route under `/agent/*`, use the helpers from `@openmdm/hono` so your code participates in the v1/v2 branching without thinking about it:
+
+```typescript
+import { Hono } from 'hono';
+import {
+  agentOkResponse,
+  agentReauth,
+  agentUnenroll,
+  agentRetry,
+} from '@openmdm/hono';
+
+const agent = new Hono();
+
+agent.get('/things', async (c) => {
+  const device = await mdm.devices.get(c.get('deviceId'));
+  if (!device) return agentUnenroll(c, 'Device not found');
+
+  const things = await mdm.things.listFor(device);
+  return agentOkResponse(c, { things });
+});
+
+agent.post('/things/:id', async (c) => {
+  const device = await mdm.devices.get(c.get('deviceId'));
+  if (!device) return agentReauth(c);
+
+  try {
+    await doTheThing(c.req.param('id'));
+    return agentOkResponse(c, { success: true });
+  } catch (err) {
+    return agentRetry(c, 'downstream unavailable');
+  }
+});
+```
+
+The helpers check `X-Openmdm-Protocol` on the current request and either return a 200 envelope or throw an `HTTPException` with the appropriate legacy status. You write the handler once, and both v1 and v2 clients get served correctly.
+
+## What is still HTTP-level
+
+HTTP `5xx` is still used for **real infrastructure failures** — the Lambda timed out, the database connection dropped, the process crashed before your handler ran. v2 envelopes are reserved for *application-level* failures the agent can reason about. If you see a 500 on an agent endpoint, something is broken at the process or platform level, not at the protocol level.
+
+Rate limiting and payload-size-too-large stay at HTTP level too (`429`, `413`). The agent's HTTP client should handle these the same way it handles any other HTTP error.
+
+## Where to go next
+
+- **[Enrollment](/docs/concepts/enrollment)** — the one endpoint that can't use the envelope because it's pre-auth.
+- **[Architecture](/docs/concepts/architecture)** — where `/agent/*` sits in the overall data flow.
