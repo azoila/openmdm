@@ -906,6 +906,23 @@ export interface AuthConfig {
   deviceTokenSecret?: string;
   /** Device token expiration in seconds (default: 365 days) */
   deviceTokenExpiration?: number;
+  /**
+   * Grace window, in seconds, during which an EXPIRED device token is still
+   * accepted for token renewal — and only for renewal, never for regular
+   * request authentication. This lets an agent that was offline past its
+   * token expiry recover with a refresh call instead of self-unenrolling.
+   * Default: 30 days. Set to 0 to require renewal strictly before expiry.
+   */
+  deviceTokenRenewalGraceSeconds?: number;
+}
+
+export interface VerifyDeviceTokenOptions {
+  /**
+   * Accept tokens whose `exp` lies at most this many seconds in the past.
+   * Intended exclusively for the token-renewal endpoint; regular request
+   * authentication must not set this.
+   */
+  ignoreExpirationWithinSeconds?: number;
 }
 
 export interface PushProviderConfig {
@@ -944,6 +961,16 @@ export interface EnrollmentConfig {
   requireApproval?: boolean;
   /** Custom enrollment validation */
   validate?: (request: EnrollmentRequest) => Promise<boolean>;
+
+  /**
+   * Maximum allowed clock skew, in seconds, between the signed enrollment
+   * `timestamp` and the server clock on the HMAC (Phase 2a) path. The
+   * timestamp is covered by the HMAC signature, so enforcing freshness
+   * bounds how long a captured enrollment request can be replayed. The
+   * pinned-key path needs no equivalent — its single-use challenge already
+   * prevents replay. Default: 900 (15 minutes). Set to 0 to disable.
+   */
+  timestampToleranceSeconds?: number;
 
   /**
    * Phase 2b device-pinned-key configuration. Optional — when
@@ -1318,7 +1345,17 @@ export interface MDMInstance {
   /** Process device heartbeat */
   processHeartbeat(deviceId: string, heartbeat: Heartbeat): Promise<void>;
   /** Verify device token */
-  verifyDeviceToken(token: string): Promise<{ deviceId: string } | null>;
+  verifyDeviceToken(
+    token: string,
+    options?: VerifyDeviceTokenOptions,
+  ): Promise<{ deviceId: string } | null>;
+  /**
+   * Issue a fresh device token for an enrolled device. Used by HTTP
+   * adapters to implement token renewal. Throws DeviceNotFoundError when
+   * the device does not exist and EnrollmentError when its status makes it
+   * ineligible (unenrolled/blocked devices cannot renew).
+   */
+  issueDeviceToken(deviceId: string): Promise<{ token: string; expiresAt: Date }>;
 
   /** Get loaded plugins */
   getPlugins(): MDMPlugin[];

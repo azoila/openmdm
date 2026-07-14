@@ -159,6 +159,9 @@ importers:
         specifier: workspace:*
         version: link:../../core
     devDependencies:
+      '@openmdm/client':
+        specifier: workspace:*
+        version: link:../../client
       hono:
         specifier: ^4.0.0
         version: 4.11.4

@@ -189,8 +189,12 @@ describe('deviceAuth middleware: v1 vs v2 failure modes', () => {
     });
   });
 
-  describe('X-Device-Id fallback (no Authorization header)', () => {
-    it('v1: accepts X-Device-Id and runs the handler', async () => {
+  describe('bare X-Device-Id (no Authorization header) is rejected', () => {
+    // A bare X-Device-Id header used to be accepted as sufficient identity.
+    // Device ids are guessable, so that was an authentication bypass: anyone
+    // could read any device's commands and config by sending the header.
+    // These tests pin the fix — the header alone must never authenticate.
+    it('v1: rejects X-Device-Id without a token (401)', async () => {
       const res = await app.request('/agent/heartbeat', {
         method: 'POST',
         headers: {
@@ -199,12 +203,11 @@ describe('deviceAuth middleware: v1 vs v2 failure modes', () => {
         },
         body: JSON.stringify({}),
       });
-      expect(res.status).toBe(200);
-      expect(mdm.verifyDeviceToken).not.toHaveBeenCalled();
-      expect(mdm.processHeartbeat).toHaveBeenCalled();
+      expect(res.status).toBe(401);
+      expect(mdm.processHeartbeat).not.toHaveBeenCalled();
     });
 
-    it('v2: accepts X-Device-Id and returns envelope success', async () => {
+    it('v2: rejects X-Device-Id without a token (reauth envelope)', async () => {
       const res = await app.request('/agent/heartbeat', {
         method: 'POST',
         headers: {
@@ -215,8 +218,10 @@ describe('deviceAuth middleware: v1 vs v2 failure modes', () => {
         body: JSON.stringify({}),
       });
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { ok: boolean };
-      expect(body.ok).toBe(true);
+      const body = (await res.json()) as { ok: boolean; action: string };
+      expect(body.ok).toBe(false);
+      expect(body.action).toBe('reauth');
+      expect(mdm.processHeartbeat).not.toHaveBeenCalled();
     });
   });
 });
