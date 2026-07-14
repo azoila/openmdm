@@ -12,7 +12,7 @@
  * ```
  */
 
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
@@ -46,6 +46,7 @@ export const commandStatusEnum = pgEnum('mdm_command_status', [
   'completed',
   'failed',
   'cancelled',
+  'expired',
 ]);
 
 export const pushProviderEnum = pgEnum('mdm_push_provider', ['fcm', 'mqtt', 'websocket']);
@@ -210,12 +211,29 @@ export const mdmCommands = pgTable(
     sentAt: timestamp('sent_at', { withTimezone: true }),
     acknowledgedAt: timestamp('acknowledged_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+
+    // Durability. See @openmdm/core's Command type for the semantics.
+    idempotencyKey: varchar('idempotency_key', { length: 255 }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(5),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
   },
   (table) => [
     index('mdm_commands_device_id_idx').on(table.deviceId),
     index('mdm_commands_status_idx').on(table.status),
     index('mdm_commands_device_status_idx').on(table.deviceId, table.status),
     index('mdm_commands_created_at_idx').on(table.createdAt),
+    // Partial unique index: the dedup guarantee only applies to rows that
+    // actually carry a key, so commands sent without one are unconstrained.
+    // This is what makes the ON CONFLICT DO NOTHING insert path atomic.
+    uniqueIndex('mdm_commands_device_idempotency_key_idx')
+      .on(table.deviceId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
+    // Drives the retry sweep: pending commands whose backoff has elapsed.
+    index('mdm_commands_retry_idx').on(table.status, table.lastAttemptAt),
+    // Drives the expiry reaper.
+    index('mdm_commands_expires_at_idx').on(table.expiresAt),
   ],
 );
 

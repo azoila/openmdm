@@ -50,6 +50,7 @@ import type {
   CommandFilter,
   CommandManager,
   CommandResult,
+  CommandRetryResult,
   CreateApplicationInput,
   CreateDeviceInput,
   CreateGroupInput,
@@ -283,6 +284,157 @@ export function createMDM(config: MDMConfig): MDMInstance {
   // Device Manager
   // ============================================
 
+  // ============================================
+  // Command Durability
+  // ============================================
+
+  const commandLog = logger.child({ component: 'commands' });
+
+  const DEFAULT_COMMAND_TTL_SECONDS = 7 * 24 * 60 * 60;
+  const DEFAULT_COMMAND_MAX_ATTEMPTS = 5;
+  const DEFAULT_RETRY_BACKOFF_SECONDS = 60;
+
+  const commandDefaults = {
+    ttlSeconds: config.commands?.defaultTtlSeconds ?? DEFAULT_COMMAND_TTL_SECONDS,
+    maxAttempts: config.commands?.defaultMaxAttempts ?? DEFAULT_COMMAND_MAX_ATTEMPTS,
+    backoffSeconds: config.commands?.retryBackoffSeconds ?? DEFAULT_RETRY_BACKOFF_SECONDS,
+  };
+
+  /**
+   * Apply durability defaults (expiry, max attempts) and insert the command.
+   *
+   * When the caller supplies an `idempotencyKey`, the insert goes through the
+   * adapter's atomic upsert if it has one. Adapters without it fall back to
+   * find-then-create, which narrows the duplicate window but cannot close it
+   * — two concurrent sends can still both insert. That's why the atomic path
+   * is preferred and the fallback logs a warning once.
+   */
+  const createCommandWithDurability = async (
+    input: SendCommandInput,
+  ): Promise<{ command: Command; created: boolean }> => {
+    // An explicit expiresAt wins. Otherwise derive it from the TTL — a TTL of
+    // 0 means "no expiry", which leaves expiresAt undefined.
+    let expiresAt = input.expiresAt;
+    if (!expiresAt) {
+      const ttlSeconds = input.ttlSeconds ?? commandDefaults.ttlSeconds;
+      if (ttlSeconds > 0) {
+        expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+      }
+    }
+
+    const enriched: SendCommandInput = {
+      ...input,
+      expiresAt,
+      maxAttempts: input.maxAttempts ?? commandDefaults.maxAttempts,
+    };
+
+    if (!enriched.idempotencyKey) {
+      return { command: await database.createCommand(enriched), created: true };
+    }
+
+    if (database.createCommandIdempotent) {
+      return database.createCommandIdempotent(enriched);
+    }
+
+    // Fallback: check-then-insert. Not atomic.
+    if (database.findCommandByIdempotencyKey) {
+      const existing = await database.findCommandByIdempotencyKey(
+        enriched.deviceId,
+        enriched.idempotencyKey,
+      );
+      if (existing) {
+        return { command: existing, created: false };
+      }
+    } else {
+      commandLog.warn(
+        { deviceId: enriched.deviceId },
+        'Database adapter implements neither createCommandIdempotent nor ' +
+          'findCommandByIdempotencyKey — idempotencyKey is being ignored and ' +
+          'duplicate commands can be queued.',
+      );
+    }
+
+    return { command: await database.createCommand(enriched), created: true };
+  };
+
+  /**
+   * Push a command to its device and record the outcome.
+   *
+   * Success → `sent`. Failure → the command stays `pending` with an
+   * incremented `attemptCount`, so `retryPending()` picks it up later; when
+   * attempts are exhausted it is dead-lettered instead of retrying forever.
+   * Before this existed, a failed push left the command `pending` with no
+   * record of the attempt and nothing to retry it — it sat there silently
+   * until the device happened to poll, or forever.
+   */
+  const attemptDelivery = async (command: Command): Promise<Command> => {
+    const attemptCount = (command.attemptCount ?? 0) + 1;
+    let pushed = false;
+
+    try {
+      const pushResult = await pushAdapter.send(command.deviceId, {
+        type: `command.${command.type}`,
+        payload: {
+          commandId: command.id,
+          type: command.type,
+          ...command.payload,
+        },
+        priority: 'high',
+      });
+      pushed = pushResult.success;
+    } catch (error) {
+      commandLog.warn(
+        { commandId: command.id, deviceId: command.deviceId, err: errorMessage(error) },
+        'Push threw while delivering command',
+      );
+    }
+
+    if (pushed) {
+      const updated = await database.updateCommand(command.id, {
+        status: 'sent',
+        sentAt: new Date(),
+        attemptCount,
+      });
+      return updated ?? command;
+    }
+
+    const maxAttempts = command.maxAttempts ?? commandDefaults.maxAttempts;
+    const exhausted = attemptCount >= maxAttempts;
+
+    const updated = await database.updateCommand(command.id, {
+      attemptCount,
+      ...(exhausted
+        ? {
+            status: 'failed' as const,
+            error: 'DELIVERY_EXHAUSTED',
+            completedAt: new Date(),
+          }
+        : {}),
+    });
+
+    if (exhausted) {
+      commandLog.error(
+        { commandId: command.id, deviceId: command.deviceId, attemptCount, maxAttempts },
+        'Command dead-lettered: delivery attempts exhausted',
+      );
+      const device = await database.findDevice(command.deviceId);
+      if (device && updated) {
+        await emit('command.failed', {
+          device,
+          command: updated,
+          error: 'DELIVERY_EXHAUSTED',
+        });
+      }
+    } else {
+      commandLog.warn(
+        { commandId: command.id, deviceId: command.deviceId, attemptCount, maxAttempts },
+        'Command delivery failed; will retry',
+      );
+    }
+
+    return updated ?? command;
+  };
+
   const devices: DeviceManager = {
     async get(id: string): Promise<Device | null> {
       return database.findDevice(id);
@@ -378,35 +530,29 @@ export function createMDM(config: MDMConfig): MDMInstance {
       deviceId: string,
       input: Omit<SendCommandInput, 'deviceId'>,
     ): Promise<Command> {
-      const command = await database.createCommand({
+      const { command, created } = await createCommandWithDurability({
         ...input,
         deviceId,
       });
 
-      // Send via push
-      const pushResult = await pushAdapter.send(deviceId, {
-        type: `command.${input.type}`,
-        payload: {
-          commandId: command.id,
-          type: input.type,
-          ...input.payload,
-        },
-        priority: 'high',
-      });
-
-      // Update command status
-      if (pushResult.success) {
-        await database.updateCommand(command.id, {
-          status: 'sent',
-          sentAt: new Date(),
-        });
+      // A duplicate `idempotencyKey` returns the command that already
+      // exists rather than queueing the operation twice. Re-pushing is
+      // pointless (and, for a completed command, wrong).
+      if (!created) {
+        commandLog.debug(
+          { commandId: command.id, deviceId, idempotencyKey: input.idempotencyKey },
+          'Duplicate idempotency key — returning the existing command',
+        );
+        return command;
       }
+
+      const delivered = await attemptDelivery(command);
 
       if (config.onCommand) {
-        await config.onCommand(command);
+        await config.onCommand(delivered);
       }
 
-      return database.findCommand(command.id) as Promise<Command>;
+      return delivered;
     },
 
     async sync(deviceId: string): Promise<Command> {
@@ -657,10 +803,8 @@ export function createMDM(config: MDMConfig): MDMInstance {
     },
 
     async send(input: SendCommandInput): Promise<Command> {
-      return devices.sendCommand(input.deviceId, {
-        type: input.type,
-        payload: input.payload,
-      });
+      const { deviceId, ...rest } = input;
+      return devices.sendCommand(deviceId, rest);
     },
 
     async cancel(id: string): Promise<Command> {
@@ -728,7 +872,96 @@ export function createMDM(config: MDMConfig): MDMInstance {
     },
 
     async getPending(deviceId: string): Promise<Command[]> {
-      return database.getPendingCommands(deviceId);
+      const pending = await database.getPendingCommands(deviceId);
+      const now = Date.now();
+
+      // Filter expired commands out here rather than trusting the reaper to
+      // have run. A queued `factoryReset` that outlived its TTL must never be
+      // handed to a device that finally comes back online, even if the sweep
+      // is lagging or was never scheduled.
+      const live: Command[] = [];
+      const expired: Command[] = [];
+      for (const command of pending) {
+        if (command.expiresAt && command.expiresAt.getTime() <= now) {
+          expired.push(command);
+        } else {
+          live.push(command);
+        }
+      }
+
+      if (expired.length > 0) {
+        commandLog.info(
+          { deviceId, count: expired.length },
+          'Withholding expired commands from device and marking them expired',
+        );
+        await Promise.all(
+          expired.map((command) =>
+            database
+              .updateCommand(command.id, { status: 'expired', completedAt: new Date() })
+              .catch((error) =>
+                commandLog.error(
+                  { commandId: command.id, err: errorMessage(error) },
+                  'Failed to mark command expired',
+                ),
+              ),
+          ),
+        );
+      }
+
+      return live;
+    },
+
+    async retryPending(options?: { limit?: number }): Promise<CommandRetryResult> {
+      const limit = options?.limit ?? 100;
+      const result: CommandRetryResult = { delivered: 0, retried: 0, deadLettered: 0 };
+
+      if (!database.listRetryableCommands) {
+        commandLog.warn(
+          'Database adapter does not implement listRetryableCommands — ' +
+            'commands whose push failed cannot be retried automatically.',
+        );
+        return result;
+      }
+
+      const retryable = await database.listRetryableCommands({
+        now: new Date(),
+        backoffSeconds: commandDefaults.backoffSeconds,
+        limit,
+      });
+
+      for (const command of retryable) {
+        const updated = await attemptDelivery(command);
+        if (updated.status === 'sent') {
+          result.delivered += 1;
+        } else if (updated.status === 'failed') {
+          result.deadLettered += 1;
+        } else {
+          result.retried += 1;
+        }
+      }
+
+      if (retryable.length > 0) {
+        commandLog.info({ ...result }, 'Command delivery sweep complete');
+      }
+
+      return result;
+    },
+
+    async expireStale(): Promise<number> {
+      if (!database.expireCommands) {
+        commandLog.warn(
+          'Database adapter does not implement expireCommands — expired ' +
+            'commands are still withheld from devices, but their rows keep ' +
+            'their previous status.',
+        );
+        return 0;
+      }
+
+      const count = await database.expireCommands(new Date());
+      if (count > 0) {
+        commandLog.info({ count }, 'Reaped expired commands');
+      }
+      return count;
     },
   };
 
