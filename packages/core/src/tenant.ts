@@ -6,14 +6,14 @@
  */
 
 import type {
+  CreateTenantInput,
+  DatabaseAdapter,
   Tenant,
-  TenantManager,
   TenantFilter,
   TenantListResult,
+  TenantManager,
   TenantStats,
-  CreateTenantInput,
   UpdateTenantInput,
-  DatabaseAdapter,
 } from './types';
 import { TenantNotFoundError, ValidationError } from './types';
 
@@ -68,7 +68,7 @@ export function createTenantManager(db: DatabaseAdapter): TenantManager {
       if (!validateSlug(data.slug)) {
         throw new ValidationError(
           'Invalid slug format. Must be 3-50 lowercase alphanumeric characters with hyphens.',
-          { slug: data.slug }
+          { slug: data.slug },
         );
       }
 
@@ -101,7 +101,7 @@ export function createTenantManager(db: DatabaseAdapter): TenantManager {
         if (!validateSlug(data.slug)) {
           throw new ValidationError(
             'Invalid slug format. Must be 3-50 lowercase alphanumeric characters with hyphens.',
-            { slug: data.slug }
+            { slug: data.slug },
           );
         }
 

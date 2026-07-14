@@ -6,11 +6,11 @@
  */
 
 import type {
+  DatabaseAdapter,
+  EnqueueMessageInput,
   MessageQueueManager,
   QueuedMessage,
-  EnqueueMessageInput,
   QueueStats,
-  DatabaseAdapter,
 } from './types';
 
 /**
@@ -154,8 +154,8 @@ export function canRetryMessage(message: QueuedMessage): boolean {
 export function calculateBackoffDelay(
   attempts: number,
   baseDelayMs: number = 1000,
-  maxDelayMs: number = 300000 // 5 minutes
+  maxDelayMs: number = 300000, // 5 minutes
 ): number {
-  const delay = baseDelayMs * Math.pow(2, attempts - 1);
+  const delay = baseDelayMs * 2 ** (attempts - 1);
   return Math.min(delay, maxDelayMs);
 }

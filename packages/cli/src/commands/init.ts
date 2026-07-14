@@ -1,8 +1,8 @@
 import chalk from 'chalk';
-import inquirer from 'inquirer';
 import fs from 'fs/promises';
-import path from 'path';
+import inquirer from 'inquirer';
 import ora from 'ora';
+import path from 'path';
 
 interface InitOptions {
   database: string;
@@ -107,8 +107,7 @@ export async function initProject(options: InitOptions): Promise<void> {
     const jwtSecret = generateSecret(64);
 
     // Create .env file
-    const envContent = TEMPLATE_ENV
-      .replace('{{push}}', answers.push)
+    const envContent = TEMPLATE_ENV.replace('{{push}}', answers.push)
       .replace('{{deviceSecret}}', deviceSecret)
       .replace('{{jwtSecret}}', jwtSecret);
 
@@ -132,9 +131,10 @@ export async function initProject(options: InitOptions): Promise<void> {
         pushConfig = '// No push provider configured';
     }
 
-    const configContent = TEMPLATE_CONFIG
-      .replace('{{pushImport}}', pushImport)
-      .replace('{{pushConfig}}', pushConfig);
+    const configContent = TEMPLATE_CONFIG.replace('{{pushImport}}', pushImport).replace(
+      '{{pushConfig}}',
+      pushConfig,
+    );
 
     await fs.mkdir('src', { recursive: true });
     await fs.writeFile('src/mdm.ts', configContent);

@@ -6,15 +6,15 @@
  */
 
 import type {
-  ScheduleManager,
+  CreateScheduledTaskInput,
+  DatabaseAdapter,
   ScheduledTask,
   ScheduledTaskFilter,
   ScheduledTaskListResult,
-  CreateScheduledTaskInput,
-  UpdateScheduledTaskInput,
-  TaskSchedule,
+  ScheduleManager,
   TaskExecution,
-  DatabaseAdapter,
+  TaskSchedule,
+  UpdateScheduledTaskInput,
 } from './types';
 
 /**
@@ -91,10 +91,7 @@ function matchesCronField(pattern: string, value: number): boolean {
 /**
  * Check if current time is within a maintenance window
  */
-function isInMaintenanceWindow(
-  window: TaskSchedule['window'],
-  now: Date = new Date()
-): boolean {
+function isInMaintenanceWindow(window: TaskSchedule['window'], now: Date = new Date()): boolean {
   if (!window) return false;
 
   const dayOfWeek = now.getDay();
@@ -121,7 +118,7 @@ function isInMaintenanceWindow(
  */
 function calculateNextWindowRun(
   window: TaskSchedule['window'],
-  from: Date = new Date()
+  from: Date = new Date(),
 ): Date | null {
   if (!window) return null;
 
@@ -279,11 +276,7 @@ export function createScheduleManager(db: DatabaseAdapter): ScheduleManager {
     },
 
     async runNow(id: string): Promise<TaskExecution> {
-      if (
-        !db.findScheduledTask ||
-        !db.createTaskExecution ||
-        !db.updateScheduledTask
-      ) {
+      if (!db.findScheduledTask || !db.createTaskExecution || !db.updateScheduledTask) {
         throw new Error('Database adapter does not support task scheduling');
       }
 
@@ -322,4 +315,4 @@ export function createScheduleManager(db: DatabaseAdapter): ScheduleManager {
 /**
  * Export utility functions
  */
-export { parseCronNextRun, isInMaintenanceWindow, calculateNextWindowRun };
+export { calculateNextWindowRun, isInMaintenanceWindow, parseCronNextRun };

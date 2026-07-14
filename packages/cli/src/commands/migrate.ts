@@ -202,7 +202,9 @@ export async function runMigrations(options: MigrateOptions): Promise<void> {
   console.log(chalk.blue('\\n📦 OpenMDM Database Migration\\n'));
 
   console.log(chalk.yellow('⚠  This command does not execute migrations against your database.'));
-  console.log(chalk.yellow('   It prints legacy SQL for reference only. Use the supported workflow:'));
+  console.log(
+    chalk.yellow('   It prints legacy SQL for reference only. Use the supported workflow:'),
+  );
   console.log('');
   console.log(chalk.cyan('     npx openmdm generate --adapter drizzle --provider pg'));
   console.log(chalk.cyan('     npx drizzle-kit generate'));

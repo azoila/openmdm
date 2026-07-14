@@ -1,15 +1,11 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { drizzleAdapter } from '../../../packages/adapters/drizzle/src/index';
 import {
   mdmEnrollmentChallenges,
   mdmPluginStorage,
 } from '../../../packages/adapters/drizzle/src/postgres';
 import type { DatabaseAdapter } from '../../../packages/core/src/types';
-import {
-  connect,
-  resetEnrollmentChallenges,
-  type TestDB,
-} from '../src/db';
+import { connect, resetEnrollmentChallenges, type TestDB } from '../src/db';
 
 /**
  * E2E tests for the Phase 2b enrollment challenge storage path
@@ -36,10 +32,7 @@ type AdapterWithChallenges = Required<
 function assertHasChallenges(
   adapter: DatabaseAdapter,
 ): asserts adapter is DatabaseAdapter & AdapterWithChallenges {
-  if (
-    !adapter.createEnrollmentChallenge ||
-    !adapter.consumeEnrollmentChallenge
-  ) {
+  if (!adapter.createEnrollmentChallenge || !adapter.consumeEnrollmentChallenge) {
     throw new Error('drizzleAdapter did not expose enrollment-challenge methods');
   }
 }
@@ -196,11 +189,7 @@ describe('drizzleAdapter enrollment challenges (e2e, real Postgres)', () => {
     expect(deleted).toBe(1);
 
     expect(await adapter.findEnrollmentChallenge('chal-future')).not.toBeNull();
-    expect(
-      await adapter.findEnrollmentChallenge('chal-past-unconsumed'),
-    ).toBeNull();
-    expect(
-      await adapter.findEnrollmentChallenge('chal-past-consumed'),
-    ).not.toBeNull();
+    expect(await adapter.findEnrollmentChallenge('chal-past-unconsumed')).toBeNull();
+    expect(await adapter.findEnrollmentChallenge('chal-past-consumed')).not.toBeNull();
   });
 });

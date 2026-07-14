@@ -5,17 +5,17 @@
  * Similar to better-auth's approach.
  */
 
-import chalk from 'chalk';
-import ora from 'ora';
-import { writeFileSync, existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { existsSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import chalk from 'chalk';
 import inquirer from 'inquirer';
+import ora from 'ora';
 import {
-  generateDrizzleSchema,
-  generateSqlSchema,
   type AdapterType,
   type DatabaseProvider,
+  generateDrizzleSchema,
+  generateSqlSchema,
 } from '../generators/index.js';
 
 interface GenerateOptions {

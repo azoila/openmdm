@@ -1,11 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
-import { createMDM, createDashboardManager } from '../src/index';
-import type {
-  DatabaseAdapter,
-  Device,
-  Policy,
-  Command,
-} from '../src/types';
+import { describe, expect, it, vi } from 'vitest';
+import { createDashboardManager, createMDM } from '../src/index';
+import type { Command, DatabaseAdapter, Device, Policy } from '../src/types';
 
 /**
  * Pinning tests for the current state of tenant isolation and RBAC
@@ -37,11 +32,7 @@ function createMockAdapter(): DatabaseAdapter {
       return devices.get(id) ?? null;
     },
     async findDeviceByEnrollmentId(enrollmentId) {
-      return (
-        Array.from(devices.values()).find(
-          (d) => d.enrollmentId === enrollmentId,
-        ) ?? null
-      );
+      return Array.from(devices.values()).find((d) => d.enrollmentId === enrollmentId) ?? null;
     },
     async listDevices() {
       const list = Array.from(devices.values());
@@ -87,9 +78,7 @@ function createMockAdapter(): DatabaseAdapter {
       return policies.get(id) ?? null;
     },
     async findDefaultPolicy() {
-      return (
-        Array.from(policies.values()).find((p) => p.isDefault) ?? null
-      );
+      return Array.from(policies.values()).find((p) => p.isDefault) ?? null;
     },
     async listPolicies() {
       return Array.from(policies.values());
@@ -323,32 +312,30 @@ describe('Dashboard tenant-scope backstop (added in this PR)', () => {
   it('throws on getDeviceStatusBreakdown with tenantId', async () => {
     const db = createMockAdapter();
     const dashboard = createDashboardManager(db);
-    await expect(
-      dashboard.getDeviceStatusBreakdown('acme'),
-    ).rejects.toThrow(/getDeviceStatusBreakdown/);
+    await expect(dashboard.getDeviceStatusBreakdown('acme')).rejects.toThrow(
+      /getDeviceStatusBreakdown/,
+    );
   });
 
   it('throws on getCommandSuccessRates with tenantId', async () => {
     const db = createMockAdapter();
     const dashboard = createDashboardManager(db);
-    await expect(
-      dashboard.getCommandSuccessRates('acme'),
-    ).rejects.toThrow(/getCommandSuccessRates/);
+    await expect(dashboard.getCommandSuccessRates('acme')).rejects.toThrow(
+      /getCommandSuccessRates/,
+    );
   });
 
   it('throws on getEnrollmentTrend with tenantId', async () => {
     const db = createMockAdapter();
     const dashboard = createDashboardManager(db);
-    await expect(
-      dashboard.getEnrollmentTrend(7, 'acme'),
-    ).rejects.toThrow(/getEnrollmentTrend/);
+    await expect(dashboard.getEnrollmentTrend(7, 'acme')).rejects.toThrow(/getEnrollmentTrend/);
   });
 
   it('throws on getAppInstallationSummary with tenantId', async () => {
     const db = createMockAdapter();
     const dashboard = createDashboardManager(db);
-    await expect(
-      dashboard.getAppInstallationSummary('acme'),
-    ).rejects.toThrow(/getAppInstallationSummary/);
+    await expect(dashboard.getAppInstallationSummary('acme')).rejects.toThrow(
+      /getAppInstallationSummary/,
+    );
   });
 });

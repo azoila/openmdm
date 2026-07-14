@@ -22,114 +22,117 @@
  * ```
  */
 
-import { createHmac, timingSafeEqual, randomUUID } from 'crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
+import { createAuditManager } from './audit';
+import { createAuthorizationManager } from './authorization';
+import { createDashboardManager } from './dashboard';
+import {
+  ChallengeInvalidError,
+  canonicalDeviceRequestMessage,
+  canonicalEnrollmentMessage,
+  InvalidPublicKeyError,
+  importPublicKeyFromSpki,
+  PublicKeyMismatchError,
+  verifyDeviceRequest,
+  verifyEcdsaSignature,
+} from './device-identity';
+import { createConsoleLogger, createSilentLogger } from './logger';
+import { createMemoryPluginStorageAdapter, createPluginStorageAdapter } from './plugin-storage';
+import { createMessageQueueManager } from './queue';
+import { createScheduleManager } from './schedule';
+import { createTenantManager } from './tenant';
 import type {
-  MDMConfig,
-  MDMInstance,
-  Device,
-  Policy,
   Application,
+  ApplicationManager,
+  AuditManager,
+  AuthorizationManager,
   Command,
-  Group,
-  Heartbeat,
-  EnrollmentRequest,
-  EnrollmentResponse,
+  CommandFilter,
+  CommandManager,
+  CommandResult,
+  CreateApplicationInput,
+  CreateDeviceInput,
+  CreateGroupInput,
+  CreatePolicyInput,
+  DashboardManager,
+  DeployTarget,
+  Device,
   DeviceFilter,
   DeviceListResult,
-  CreateDeviceInput,
-  UpdateDeviceInput,
-  CreatePolicyInput,
-  UpdatePolicyInput,
-  CreateApplicationInput,
-  UpdateApplicationInput,
-  SendCommandInput,
-  CommandFilter,
-  CreateGroupInput,
-  UpdateGroupInput,
-  DeployTarget,
   DeviceManager,
-  PolicyManager,
-  ApplicationManager,
-  CommandManager,
-  GroupManager,
-  PushAdapter,
-  PushResult,
-  PushBatchResult,
-  PushMessage,
-  EventType,
+  EnrollmentChallenge,
+  EnrollmentRequest,
+  EnrollmentResponse,
   EventHandler,
   EventPayloadMap,
-  MDMEvent,
-  MDMPlugin,
-  CommandResult,
-  InstalledApp,
-  WebhookManager,
-  TenantManager,
-  AuthorizationManager,
-  AuditManager,
-  ScheduleManager,
-  MessageQueueManager,
-  DashboardManager,
-  PluginStorageAdapter,
-  GroupTreeNode,
+  EventType,
+  Group,
   GroupHierarchyStats,
+  GroupManager,
+  GroupTreeNode,
+  Heartbeat,
+  InstalledApp,
   Logger,
-  EnrollmentChallenge,
+  MDMConfig,
+  MDMEvent,
+  MDMInstance,
+  MDMPlugin,
+  MessageQueueManager,
+  PluginStorageAdapter,
+  Policy,
+  PolicyManager,
+  PushAdapter,
+  PushBatchResult,
+  PushMessage,
+  PushResult,
+  ScheduleManager,
+  SendCommandInput,
+  TenantManager,
+  UpdateApplicationInput,
+  UpdateDeviceInput,
+  UpdateGroupInput,
+  UpdatePolicyInput,
+  WebhookManager,
 } from './types';
 import {
-  DeviceNotFoundError,
   ApplicationNotFoundError,
   CommandNotFoundError,
+  DeviceNotFoundError,
   EnrollmentError,
 } from './types';
 import { createWebhookManager } from './webhooks';
-import { createTenantManager } from './tenant';
-import { createAuthorizationManager } from './authorization';
-import { createAuditManager } from './audit';
-import { createScheduleManager } from './schedule';
-import { createMessageQueueManager } from './queue';
-import { createDashboardManager } from './dashboard';
-import { createPluginStorageAdapter, createMemoryPluginStorageAdapter } from './plugin-storage';
-import { createConsoleLogger, createSilentLogger } from './logger';
-import {
-  importPublicKeyFromSpki,
-  verifyEcdsaSignature,
-  canonicalEnrollmentMessage,
-  canonicalDeviceRequestMessage,
-  verifyDeviceRequest,
-  InvalidPublicKeyError,
-  PublicKeyMismatchError,
-  ChallengeInvalidError,
-} from './device-identity';
 
-// Re-export all types
-export * from './types';
-export * from './schema';
 export * from './agent-protocol';
-export { createWebhookManager, verifyWebhookSignature } from './webhooks';
-export type { WebhookPayload } from './webhooks';
-export { createConsoleLogger, createSilentLogger } from './logger';
-
+export { createAuditManager } from './audit';
+export { createAuthorizationManager } from './authorization';
+export { createDashboardManager } from './dashboard';
 // Device identity (Phase 2b)
 export {
-  importPublicKeyFromSpki,
-  verifyEcdsaSignature,
-  canonicalEnrollmentMessage,
-  canonicalDeviceRequestMessage,
-  verifyDeviceRequest,
-  InvalidPublicKeyError,
-  PublicKeyMismatchError,
   ChallengeInvalidError,
+  canonicalDeviceRequestMessage,
+  canonicalEnrollmentMessage,
+  InvalidPublicKeyError,
+  importPublicKeyFromSpki,
+  PublicKeyMismatchError,
+  verifyDeviceRequest,
+  verifyEcdsaSignature,
 } from './device-identity';
-
+export { createConsoleLogger, createSilentLogger } from './logger';
+export {
+  createMemoryPluginStorageAdapter,
+  createPluginKey,
+  createPluginStorageAdapter,
+  parsePluginKey,
+} from './plugin-storage';
+export { createMessageQueueManager } from './queue';
+export { createScheduleManager } from './schedule';
+export * from './schema';
 // Re-export enterprise manager factories
 export { createTenantManager } from './tenant';
-export { createAuthorizationManager } from './authorization';
-export { createAuditManager } from './audit';
-export { createScheduleManager } from './schedule';
-export { createMessageQueueManager } from './queue';
-export { createDashboardManager } from './dashboard';
-export { createPluginStorageAdapter, createMemoryPluginStorageAdapter, createPluginKey, parsePluginKey } from './plugin-storage';
+// Re-export all types
+export * from './types';
+export type { WebhookPayload } from './webhooks';
+export { createWebhookManager, verifyWebhookSignature } from './webhooks';
 
 /**
  * Create an MDM instance with the given configuration.
@@ -210,10 +213,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
         : undefined;
 
   // Event subscription
-  const on = <T extends EventType>(
-    event: T,
-    handler: EventHandler<T>
-  ): (() => void) => {
+  const on = <T extends EventType>(event: T, handler: EventHandler<T>): (() => void) => {
     if (!eventHandlers.has(event)) {
       eventHandlers.set(event, new Set());
     }
@@ -227,10 +227,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
   };
 
   // Event emission
-  const emit = async <T extends EventType>(
-    event: T,
-    data: EventPayloadMap[T]
-  ): Promise<void> => {
+  const emit = async <T extends EventType>(event: T, data: EventPayloadMap[T]): Promise<void> => {
     const handlers = eventHandlers.get(event);
 
     // Create event record
@@ -256,10 +253,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
     // Deliver webhooks (async, don't wait)
     if (webhookManager) {
       webhookManager.deliver(eventRecord).catch((error) => {
-        logger.error(
-          { err: errorMessage(error), event },
-          'Webhook delivery error',
-        );
+        logger.error({ err: errorMessage(error), event }, 'Webhook delivery error');
       });
     }
 
@@ -269,10 +263,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
         try {
           await handler(eventRecord);
         } catch (error) {
-          logger.error(
-            { err: errorMessage(error), event },
-            'Event handler threw',
-          );
+          logger.error({ err: errorMessage(error), event }, 'Event handler threw');
         }
       }
     }
@@ -357,10 +348,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       }
     },
 
-    async assignPolicy(
-      deviceId: string,
-      policyId: string | null
-    ): Promise<Device> {
+    async assignPolicy(deviceId: string, policyId: string | null): Promise<Device> {
       const device = await this.update(deviceId, { policyId });
 
       // Notify device of policy change
@@ -387,7 +375,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
 
     async sendCommand(
       deviceId: string,
-      input: Omit<SendCommandInput, 'deviceId'>
+      input: Omit<SendCommandInput, 'deviceId'>,
     ): Promise<Command> {
       const command = await database.createCommand({
         ...input,
@@ -537,10 +525,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       return database.findApplication(id);
     },
 
-    async getByPackage(
-      packageName: string,
-      version?: string
-    ): Promise<Application | null> {
+    async getByPackage(packageName: string, version?: string): Promise<Application | null> {
       return database.findApplicationByPackage(packageName, version);
     },
 
@@ -630,7 +615,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
     async installOnDevice(
       packageName: string,
       deviceId: string,
-      version?: string
+      version?: string,
     ): Promise<Command> {
       const app = await database.findApplicationByPackage(packageName, version);
       if (!app) {
@@ -649,10 +634,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       });
     },
 
-    async uninstallFromDevice(
-      packageName: string,
-      deviceId: string
-    ): Promise<Command> {
+    async uninstallFromDevice(packageName: string, deviceId: string): Promise<Command> {
       return devices.sendCommand(deviceId, {
         type: 'uninstallApp',
         payload: { packageName },
@@ -816,9 +798,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       };
 
       // Find root groups (those with no parent or matching rootId)
-      const roots = allGroups.filter((g) =>
-        rootId ? g.id === rootId : !g.parentId
-      );
+      const roots = allGroups.filter((g) => (rootId ? g.id === rootId : !g.parentId));
 
       return roots.map((root) => buildNode(root, 0, []));
     },
@@ -945,17 +925,10 @@ export function createMDM(config: MDMConfig): MDMInstance {
   // Enrollment
   // ============================================
 
-  const enroll = async (
-    request: EnrollmentRequest
-  ): Promise<EnrollmentResponse> => {
+  const enroll = async (request: EnrollmentRequest): Promise<EnrollmentResponse> => {
     // Validate method if restricted
-    if (
-      enrollment?.allowedMethods &&
-      !enrollment.allowedMethods.includes(request.method)
-    ) {
-      throw new EnrollmentError(
-        `Enrollment method '${request.method}' is not allowed`
-      );
+    if (enrollment?.allowedMethods && !enrollment.allowedMethods.includes(request.method)) {
+      throw new EnrollmentError(`Enrollment method '${request.method}' is not allowed`);
     }
 
     // Determine which enrollment path the request is asking for.
@@ -976,10 +949,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
 
     // HMAC path (Phase 2a): unchanged behavior.
     if (!isPinnedKeyPath && enrollment?.deviceSecret) {
-      const isValid = verifyEnrollmentSignature(
-        request,
-        enrollment.deviceSecret
-      );
+      const isValid = verifyEnrollmentSignature(request, enrollment.deviceSecret);
       if (!isValid) {
         throw new EnrollmentError('Invalid enrollment signature');
       }
@@ -1018,9 +988,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       // Atomically consume the challenge. This must happen BEFORE
       // signature verification, otherwise two concurrent requests
       // with the same challenge could both succeed.
-      challengeRecord = await database.consumeEnrollmentChallenge(
-        request.attestationChallenge,
-      );
+      challengeRecord = await database.consumeEnrollmentChallenge(request.attestationChallenge);
       if (!challengeRecord) {
         throw new ChallengeInvalidError(
           'Enrollment challenge is missing, expired, or already consumed',
@@ -1048,15 +1016,9 @@ export function createMDM(config: MDMConfig): MDMInstance {
         challenge: request.attestationChallenge,
       });
 
-      const verified = verifyEcdsaSignature(
-        importedPublicKey,
-        canonical,
-        request.signature,
-      );
+      const verified = verifyEcdsaSignature(importedPublicKey, canonical, request.signature);
       if (!verified) {
-        throw new EnrollmentError(
-          'Invalid enrollment signature (device-pinned-key path)',
-        );
+        throw new EnrollmentError('Invalid enrollment signature (device-pinned-key path)');
       }
     }
 
@@ -1070,14 +1032,11 @@ export function createMDM(config: MDMConfig): MDMInstance {
 
     // Determine enrollment ID
     const enrollmentId =
-      request.macAddress ||
-      request.serialNumber ||
-      request.imei ||
-      request.androidId;
+      request.macAddress || request.serialNumber || request.imei || request.androidId;
 
     if (!enrollmentId) {
       throw new EnrollmentError(
-        'Device must provide at least one identifier (macAddress, serialNumber, imei, or androidId)'
+        'Device must provide at least one identifier (macAddress, serialNumber, imei, or androidId)',
       );
     }
 
@@ -1171,9 +1130,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       }
       // Status remains 'pending'
     } else {
-      throw new EnrollmentError(
-        'Device not registered and auto-enroll is disabled'
-      );
+      throw new EnrollmentError('Device not registered and auto-enroll is disabled');
     }
 
     // Get policy
@@ -1186,8 +1143,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
     }
 
     // Generate JWT token for device auth
-    const tokenSecret =
-      config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
+    const tokenSecret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
     const tokenExpiration = config.auth?.deviceTokenExpiration || 365 * 24 * 60 * 60;
     const token = generateDeviceToken(device.id, tokenSecret, tokenExpiration);
 
@@ -1233,10 +1189,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
   // Heartbeat Processing
   // ============================================
 
-  const processHeartbeat = async (
-    deviceId: string,
-    heartbeat: Heartbeat
-  ): Promise<void> => {
+  const processHeartbeat = async (deviceId: string, heartbeat: Heartbeat): Promise<void> => {
     const device = await database.findDevice(deviceId);
     if (!device) {
       throw new DeviceNotFoundError(deviceId);
@@ -1270,12 +1223,8 @@ export function createMDM(config: MDMConfig): MDMInstance {
 
     // Check for app changes
     if (device.installedApps && heartbeat.installedApps) {
-      const oldApps = new Map(
-        device.installedApps.map((a) => [a.packageName, a])
-      );
-      const newApps = new Map(
-        heartbeat.installedApps.map((a) => [a.packageName, a])
-      );
+      const oldApps = new Map(device.installedApps.map((a) => [a.packageName, a]));
+      const newApps = new Map(heartbeat.installedApps.map((a) => [a.packageName, a]));
 
       // Check for new installs
       for (const [pkg, app] of newApps) {
@@ -1319,12 +1268,9 @@ export function createMDM(config: MDMConfig): MDMInstance {
   // Token Verification
   // ============================================
 
-  const verifyDeviceToken = async (
-    token: string
-  ): Promise<{ deviceId: string } | null> => {
+  const verifyDeviceToken = async (token: string): Promise<{ deviceId: string } | null> => {
     try {
-      const tokenSecret =
-        config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
+      const tokenSecret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
 
       const parts = token.split('.');
       if (parts.length !== 3) {
@@ -1343,9 +1289,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       }
 
       // Decode payload
-      const decoded = JSON.parse(
-        Buffer.from(payload, 'base64url').toString('utf-8')
-      );
+      const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
 
       // Check expiration
       if (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000)) {
@@ -1439,23 +1383,14 @@ function createPushAdapter(
   // This is a base implementation that logs and stores tokens
   return {
     async send(deviceId: string, message: PushMessage): Promise<PushResult> {
-      pushLogger.debug(
-        { deviceId, type: message.type, payload: message.payload },
-        'send',
-      );
+      pushLogger.debug({ deviceId, type: message.type, payload: message.payload }, 'send');
 
       // In production, this would be replaced by FCM/MQTT adapter
       return { success: true, messageId: randomUUID() };
     },
 
-    async sendBatch(
-      deviceIds: string[],
-      message: PushMessage
-    ): Promise<PushBatchResult> {
-      pushLogger.debug(
-        { count: deviceIds.length, type: message.type },
-        'sendBatch',
-      );
+    async sendBatch(deviceIds: string[], message: PushMessage): Promise<PushBatchResult> {
+      pushLogger.debug({ count: deviceIds.length, type: message.type }, 'sendBatch');
 
       const results = deviceIds.map((deviceId) => ({
         deviceId,
@@ -1499,14 +1434,8 @@ function createStubPushAdapter(logger: Logger): PushAdapter {
       return { success: true, messageId: 'stub' };
     },
 
-    async sendBatch(
-      deviceIds: string[],
-      message: PushMessage
-    ): Promise<PushBatchResult> {
-      stubLogger.debug(
-        { count: deviceIds.length, type: message.type },
-        'sendBatch (stub)',
-      );
+    async sendBatch(deviceIds: string[], message: PushMessage): Promise<PushBatchResult> {
+      stubLogger.debug({ count: deviceIds.length, type: message.type }, 'sendBatch (stub)');
       return {
         successCount: deviceIds.length,
         failureCount: 0,
@@ -1523,10 +1452,7 @@ function createStubPushAdapter(logger: Logger): PushAdapter {
 // Utility Functions
 // ============================================
 
-export function verifyEnrollmentSignature(
-  request: EnrollmentRequest,
-  secret: string
-): boolean {
+export function verifyEnrollmentSignature(request: EnrollmentRequest, secret: string): boolean {
   const { signature, ...data } = request;
 
   if (!signature) {
@@ -1549,28 +1475,17 @@ export function verifyEnrollmentSignature(
     data.timestamp,
   ].join('|');
 
-  const expectedSignature = createHmac('sha256', secret)
-    .update(message)
-    .digest('hex');
+  const expectedSignature = createHmac('sha256', secret).update(message).digest('hex');
 
   try {
-    return timingSafeEqual(
-      Buffer.from(signature, 'hex'),
-      Buffer.from(expectedSignature, 'hex')
-    );
+    return timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expectedSignature, 'hex'));
   } catch {
     return false;
   }
 }
 
-function generateDeviceToken(
-  deviceId: string,
-  secret: string,
-  expirationSeconds: number
-): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: 'HS256', typ: 'JWT' })
-  ).toString('base64url');
+function generateDeviceToken(deviceId: string, secret: string, expirationSeconds: number): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
 
   const now = Math.floor(Date.now() / 1000);
   const payload = Buffer.from(
@@ -1579,12 +1494,10 @@ function generateDeviceToken(
       iat: now,
       exp: now + expirationSeconds,
       iss: 'openmdm',
-    })
+    }),
   ).toString('base64url');
 
-  const signature = createHmac('sha256', secret)
-    .update(`${header}.${payload}`)
-    .digest('base64url');
+  const signature = createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url');
 
   return `${header}.${payload}.${signature}`;
 }

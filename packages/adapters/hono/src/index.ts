@@ -17,41 +17,36 @@
  * ```
  */
 
-import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
-import type { Context, MiddlewareHandler, Env } from 'hono';
 import type {
-  MDMInstance,
-  EnrollmentRequest,
-  Heartbeat,
-  DeviceFilter,
-  CommandFilter,
-  CreatePolicyInput,
-  UpdatePolicyInput,
-  CreateApplicationInput,
-  UpdateApplicationInput,
-  CreateGroupInput,
-  UpdateGroupInput,
-  SendCommandInput,
-  MDMError,
   AuthenticationError,
   AuthorizationError,
+  CommandFilter,
+  CreateApplicationInput,
+  CreateGroupInput,
+  CreatePolicyInput,
+  DeviceFilter,
+  EnrollmentRequest,
+  Heartbeat,
+  MDMError,
+  MDMInstance,
+  SendCommandInput,
+  UpdateApplicationInput,
+  UpdateGroupInput,
+  UpdatePolicyInput,
 } from '@openmdm/core';
-import {
-  agentOkResponse,
-  agentReauth,
-  agentUnenroll,
-  isAgentV2,
-} from './agent-envelope';
+import type { Context, Env, MiddlewareHandler } from 'hono';
+import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+import { agentOkResponse, agentReauth, agentUnenroll, isAgentV2 } from './agent-envelope';
 
 // Re-export wire-protocol helpers so consumers can build custom
 // agent endpoints without depending directly on @openmdm/core.
 export {
+  agentFailResponse,
   agentOkResponse,
   agentReauth,
-  agentUnenroll,
   agentRetry,
-  agentFailResponse,
+  agentUnenroll,
   isAgentV2,
 } from './agent-envelope';
 
@@ -118,10 +113,7 @@ export interface HonoAdapterOptions {
 /**
  * Create a Hono router with OpenMDM API routes
  */
-export function honoAdapter(
-  mdm: MDMInstance,
-  options: HonoAdapterOptions = {}
-): Hono<MDMEnv> {
+export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}): Hono<MDMEnv> {
   const app = new Hono<MDMEnv>();
 
   const routes = {
@@ -170,17 +162,15 @@ export function honoAdapter(
       return options.onError(error, c);
     }
 
-    mdm.logger
-      .child({ component: 'hono' })
-      .error(
-        {
-          err: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-          path: c.req.path,
-          method: c.req.method,
-        },
-        'Unhandled error in hono adapter',
-      );
+    mdm.logger.child({ component: 'hono' }).error(
+      {
+        err: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        path: c.req.path,
+        method: c.req.method,
+      },
+      'Unhandled error in hono adapter',
+    );
 
     if (error instanceof HTTPException) {
       return c.json({ error: error.message }, error.status);
@@ -194,7 +184,7 @@ export function honoAdapter(
           code: mdmError.code,
           details: mdmError.details,
         },
-        mdmError.statusCode as any
+        mdmError.statusCode as any,
       );
     }
 
@@ -313,10 +303,7 @@ export function honoAdapter(
       overall = false;
     }
 
-    return c.json(
-      { status: overall ? 'ok' : 'degraded', checks },
-      overall ? 200 : 503,
-    );
+    return c.json({ status: overall ? 'ok' : 'degraded', checks }, overall ? 200 : 503);
   });
 
   // ============================================
@@ -338,10 +325,7 @@ export function honoAdapter(
     // implement challenge storage, rather than silently returning
     // a challenge the device will later fail to redeem.
     enrollment.get('/enroll/challenge', async (c) => {
-      if (
-        !mdm.db.createEnrollmentChallenge ||
-        !mdm.db.consumeEnrollmentChallenge
-      ) {
+      if (!mdm.db.createEnrollmentChallenge || !mdm.db.consumeEnrollmentChallenge) {
         throw new HTTPException(503, {
           message:
             'Enrollment challenges are not supported by this database adapter. ' +
@@ -350,8 +334,7 @@ export function honoAdapter(
         });
       }
 
-      const ttlSeconds =
-        mdm.config.enrollment?.pinnedKey?.challengeTtlSeconds ?? 300;
+      const ttlSeconds = mdm.config.enrollment?.pinnedKey?.challengeTtlSeconds ?? 300;
       const now = new Date();
       const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
 
@@ -609,7 +592,9 @@ export function honoAdapter(
 
     // Convenience: Wipe device
     devices.post('/:id/wipe', async (c) => {
-      const body = await c.req.json<{ preserveData?: boolean }>().catch(() => ({ preserveData: undefined }));
+      const body = await c.req
+        .json<{ preserveData?: boolean }>()
+        .catch(() => ({ preserveData: undefined }));
       const command = await mdm.devices.wipe(c.req.param('id'), body.preserveData);
       return c.json(command, 201);
     });
@@ -773,7 +758,7 @@ export function honoAdapter(
       const command = await mdm.apps.installOnDevice(
         c.req.param('packageName'),
         c.req.param('deviceId'),
-        version
+        version,
       );
       return c.json(command, 201);
     });
@@ -782,7 +767,7 @@ export function honoAdapter(
     applications.post('/:packageName/uninstall/:deviceId', async (c) => {
       const command = await mdm.apps.uninstallFromDevice(
         c.req.param('packageName'),
-        c.req.param('deviceId')
+        c.req.param('deviceId'),
       );
       return c.json(command, 201);
     });

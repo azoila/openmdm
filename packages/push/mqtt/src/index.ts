@@ -22,14 +22,14 @@
  * ```
  */
 
-import * as mqtt from 'mqtt';
 import type {
+  DatabaseAdapter,
   PushAdapter,
+  PushBatchResult,
   PushMessage,
   PushResult,
-  PushBatchResult,
-  DatabaseAdapter,
 } from '@openmdm/core';
+import * as mqtt from 'mqtt';
 
 export interface MQTTAdapterOptions {
   /**
@@ -150,7 +150,8 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
     password: options.password,
     clean: options.cleanSession ?? true,
     keepalive: options.keepAlive ?? 60,
-    reconnectPeriod: options.reconnect?.enabled !== false ? (options.reconnect?.initialDelay ?? 1000) : 0,
+    reconnectPeriod:
+      options.reconnect?.enabled !== false ? (options.reconnect?.initialDelay ?? 1000) : 0,
     ...(options.tls && {
       ca: options.tls.ca,
       cert: options.tls.cert,
@@ -213,9 +214,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
           lastSeen: new Date(),
         });
 
-        console.log(
-          `[OpenMDM MQTT] Device ${deviceId} is ${data.online ? 'online' : 'offline'}`
-        );
+        console.log(`[OpenMDM MQTT] Device ${deviceId} is ${data.online ? 'online' : 'offline'}`);
       } else if (messageType === 'ack') {
         // Message acknowledgment
         const data = JSON.parse(payload.toString());
@@ -290,7 +289,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
   async function publishToDevice(
     deviceId: string,
     message: PushMessage,
-    waitForAck: boolean = true
+    waitForAck: boolean = true,
   ): Promise<PushResult> {
     await waitForConnection();
 
@@ -343,7 +342,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
             });
           }
           // If waiting for ack, resolution happens in the message handler
-        }
+        },
       );
     });
   }
@@ -354,14 +353,9 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
         const result = await publishToDevice(deviceId, message);
 
         if (result.success) {
-          console.log(
-            `[OpenMDM MQTT] Sent to ${deviceId}: ${message.type} (${result.messageId})`
-          );
+          console.log(`[OpenMDM MQTT] Sent to ${deviceId}: ${message.type} (${result.messageId})`);
         } else {
-          console.error(
-            `[OpenMDM MQTT] Failed to send to ${deviceId}:`,
-            result.error
-          );
+          console.error(`[OpenMDM MQTT] Failed to send to ${deviceId}:`, result.error);
         }
 
         return result;
@@ -374,10 +368,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
       }
     },
 
-    async sendBatch(
-      deviceIds: string[],
-      message: PushMessage
-    ): Promise<PushBatchResult> {
+    async sendBatch(deviceIds: string[], message: PushMessage): Promise<PushBatchResult> {
       const results: Array<{ deviceId: string; result: PushResult }> = [];
       let successCount = 0;
       let failureCount = 0;
@@ -399,9 +390,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
         }
       }
 
-      console.log(
-        `[OpenMDM MQTT] Batch sent: ${successCount} success, ${failureCount} failed`
-      );
+      console.log(`[OpenMDM MQTT] Batch sent: ${successCount} success, ${failureCount} failed`);
 
       return { successCount, failureCount, results };
     },
@@ -446,21 +435,14 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
       });
 
       return new Promise((resolve, reject) => {
-        client.publish(
-          `${topicPrefix}/${deviceId}/subscribe`,
-          payload,
-          { qos: 1 },
-          (err) => {
-            if (err) {
-              reject(err);
-            } else {
-              console.log(
-                `[OpenMDM MQTT] Requested ${deviceId} to subscribe to ${topic}`
-              );
-              resolve();
-            }
+        client.publish(`${topicPrefix}/${deviceId}/subscribe`, payload, { qos: 1 }, (err) => {
+          if (err) {
+            reject(err);
+          } else {
+            console.log(`[OpenMDM MQTT] Requested ${deviceId} to subscribe to ${topic}`);
+            resolve();
           }
-        );
+        });
       });
     },
 
@@ -475,21 +457,14 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
       });
 
       return new Promise((resolve, reject) => {
-        client.publish(
-          `${topicPrefix}/${deviceId}/unsubscribe`,
-          payload,
-          { qos: 1 },
-          (err) => {
-            if (err) {
-              reject(err);
-            } else {
-              console.log(
-                `[OpenMDM MQTT] Requested ${deviceId} to unsubscribe from ${topic}`
-              );
-              resolve();
-            }
+        client.publish(`${topicPrefix}/${deviceId}/unsubscribe`, payload, { qos: 1 }, (err) => {
+          if (err) {
+            reject(err);
+          } else {
+            console.log(`[OpenMDM MQTT] Requested ${deviceId} to unsubscribe from ${topic}`);
+            resolve();
           }
-        );
+        });
       });
     },
   };
@@ -503,9 +478,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
  * - MQTT_USERNAME: (optional) Username
  * - MQTT_PASSWORD: (optional) Password
  */
-export function mqttPushAdapterFromEnv(
-  options?: Partial<MQTTAdapterOptions>
-): PushAdapter {
+export function mqttPushAdapterFromEnv(options?: Partial<MQTTAdapterOptions>): PushAdapter {
   const brokerUrl = process.env.MQTT_BROKER_URL;
   if (!brokerUrl) {
     throw new Error('MQTT_BROKER_URL environment variable is required');
@@ -557,9 +530,7 @@ export interface MQTTExtendedAdapter extends PushAdapter {
 /**
  * Create an extended MQTT adapter with device presence tracking
  */
-export function mqttExtendedAdapter(
-  options: MQTTAdapterOptions
-): MQTTExtendedAdapter {
+export function mqttExtendedAdapter(options: MQTTAdapterOptions): MQTTExtendedAdapter {
   const baseAdapter = mqttPushAdapter(options);
 
   // Access internal state through closure

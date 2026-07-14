@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import type { MDMInstance, EnrollmentChallenge } from '@openmdm/core';
+import type { EnrollmentChallenge, MDMInstance } from '@openmdm/core';
+import { describe, expect, it, vi } from 'vitest';
 import { honoAdapter } from '../src/index';
 
 /**
@@ -27,11 +27,13 @@ const silentLogger = {
 
 type MDMConfig = { enrollment?: { pinnedKey?: { challengeTtlSeconds?: number } } };
 
-function buildMockMDM(opts: {
-  createChallenge?: (c: EnrollmentChallenge) => Promise<void>;
-  withStorage?: boolean;
-  config?: MDMConfig;
-} = {}): MDMInstance {
+function buildMockMDM(
+  opts: {
+    createChallenge?: (c: EnrollmentChallenge) => Promise<void>;
+    withStorage?: boolean;
+    config?: MDMConfig;
+  } = {},
+): MDMInstance {
   const withStorage = opts.withStorage ?? true;
   const db: Record<string, unknown> = {
     listDevices: vi.fn(async () => ({
@@ -42,8 +44,7 @@ function buildMockMDM(opts: {
     })),
   };
   if (withStorage) {
-    db.createEnrollmentChallenge =
-      opts.createChallenge ?? vi.fn(async () => undefined);
+    db.createEnrollmentChallenge = opts.createChallenge ?? vi.fn(async () => undefined);
     db.consumeEnrollmentChallenge = vi.fn();
   }
 

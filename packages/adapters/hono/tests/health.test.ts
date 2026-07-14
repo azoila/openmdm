@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
 import type { MDMInstance } from '@openmdm/core';
+import { describe, expect, it, vi } from 'vitest';
 import { honoAdapter } from '../src/index';
 
 /**
@@ -30,10 +30,7 @@ const silentLogger = {
   },
 };
 
-function buildMockMDM(opts: {
-  dbOk: boolean;
-  push?: unknown;
-}): MDMInstance {
+function buildMockMDM(opts: { dbOk: boolean; push?: unknown }): MDMInstance {
   const listDevices = opts.dbOk
     ? vi.fn(async () => ({ devices: [], total: 0, limit: 1, offset: 0 }))
     : vi.fn(async () => {

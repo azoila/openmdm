@@ -1,8 +1,8 @@
-import path from 'path';
-import fs from 'fs/promises';
-import chalk from 'chalk';
-import { createJiti } from 'jiti';
 import type { MDMInstance } from '@openmdm/core';
+import chalk from 'chalk';
+import fs from 'fs/promises';
+import { createJiti } from 'jiti';
+import path from 'path';
 
 const CANDIDATE_PATHS = [
   'openmdm.config.ts',
@@ -63,7 +63,7 @@ async function resolveConfigPath(options: LoadMDMOptions): Promise<string> {
 
   throw new ConfigLoadError(
     `No OpenMDM config file found. Expected one of:\n  ${CANDIDATE_PATHS.join('\n  ')}\n` +
-      `Create one by running: openmdm init`
+      `Create one by running: openmdm init`,
   );
 }
 
@@ -100,19 +100,16 @@ export async function loadMDM(options: LoadMDMOptions = {}): Promise<MDMInstance
     mod = (await jiti.import(configPath)) as Record<string, unknown>;
   } catch (error) {
     throw new ConfigLoadError(
-      `Failed to load config at ${configPath}: ${(error as Error).message}`
+      `Failed to load config at ${configPath}: ${(error as Error).message}`,
     );
   }
 
-  const candidate =
-    (mod as { mdm?: unknown }).mdm ??
-    (mod as { default?: unknown }).default ??
-    mod;
+  const candidate = (mod as { mdm?: unknown }).mdm ?? (mod as { default?: unknown }).default ?? mod;
 
   if (!isMDMInstance(candidate)) {
     throw new ConfigLoadError(
       `${configPath} did not export an MDMInstance.\n` +
-        `Expected a named export \`mdm\` or a default export returned by createMDM().`
+        `Expected a named export \`mdm\` or a default export returned by createMDM().`,
     );
   }
 
@@ -127,7 +124,7 @@ export async function loadMDM(options: LoadMDMOptions = {}): Promise<MDMInstance
  * loop alive. A CLI command should not hang after its work is done.
  */
 export function withMDM<T extends unknown[]>(
-  handler: (mdm: MDMInstance, ...args: T) => Promise<void>
+  handler: (mdm: MDMInstance, ...args: T) => Promise<void>,
 ): (...args: T) => Promise<void> {
   return async (...args: T) => {
     let mdm: MDMInstance;

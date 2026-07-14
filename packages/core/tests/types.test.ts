@@ -1,13 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
-  MDMError,
-  DeviceNotFoundError,
-  PolicyNotFoundError,
   ApplicationNotFoundError,
-  CommandNotFoundError,
-  EnrollmentError,
   AuthenticationError,
   AuthorizationError,
+  CommandNotFoundError,
+  DeviceNotFoundError,
+  EnrollmentError,
+  MDMError,
+  PolicyNotFoundError,
   ValidationError,
 } from '../src/types';
 

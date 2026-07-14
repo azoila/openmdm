@@ -30,13 +30,13 @@
  */
 
 import {
-  S3Client,
-  PutObjectCommand,
-  GetObjectCommand,
+  CopyObjectCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
-  CopyObjectCommand,
+  PutObjectCommand,
+  S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -365,7 +365,7 @@ export function s3StorageAdapter(options: S3StorageOptions): StorageAdapter {
         new DeleteObjectCommand({
           Bucket: bucket,
           Key: fullKey,
-        })
+        }),
       );
     },
 
@@ -377,7 +377,7 @@ export function s3StorageAdapter(options: S3StorageOptions): StorageAdapter {
           new HeadObjectCommand({
             Bucket: bucket,
             Key: fullKey,
-          })
+          }),
         );
         return true;
       } catch (error: any) {
@@ -396,7 +396,7 @@ export function s3StorageAdapter(options: S3StorageOptions): StorageAdapter {
           new HeadObjectCommand({
             Bucket: bucket,
             Key: fullKey,
-          })
+          }),
         );
 
         return {
@@ -423,7 +423,7 @@ export function s3StorageAdapter(options: S3StorageOptions): StorageAdapter {
           Bucket: bucket,
           Prefix: fullPrefix,
           MaxKeys: maxKeys,
-        })
+        }),
       );
 
       const files: FileMetadata[] = (response.Contents || []).map((obj) => ({
@@ -451,14 +451,14 @@ export function s3StorageAdapter(options: S3StorageOptions): StorageAdapter {
           Key: fullDestKey,
           ...(acl && { ACL: acl }),
           ...(serverSideEncryption && { ServerSideEncryption: serverSideEncryption }),
-        })
+        }),
       );
     },
 
     async upload(
       key: string,
       data: Buffer | Uint8Array,
-      uploadOptions?: DirectUploadOptions
+      uploadOptions?: DirectUploadOptions,
     ): Promise<string> {
       const fullKey = getFullKey(key);
 
@@ -472,7 +472,7 @@ export function s3StorageAdapter(options: S3StorageOptions): StorageAdapter {
           ...(uploadOptions?.metadata && { Metadata: uploadOptions.metadata }),
           ...(serverSideEncryption && { ServerSideEncryption: serverSideEncryption }),
           ...(kmsKeyId && { SSEKMSKeyId: kmsKeyId }),
-        })
+        }),
       );
 
       return fullKey;
@@ -500,9 +500,7 @@ export function s3StorageAdapter(options: S3StorageOptions): StorageAdapter {
  * - AWS_SECRET_ACCESS_KEY (optional)
  * - S3_ENDPOINT (optional, for S3-compatible services)
  */
-export function s3StorageAdapterFromEnv(
-  options?: Partial<S3StorageOptions>
-): StorageAdapter {
+export function s3StorageAdapterFromEnv(options?: Partial<S3StorageOptions>): StorageAdapter {
   const bucket = process.env.S3_BUCKET;
   if (!bucket) {
     throw new Error('S3_BUCKET environment variable is required');
@@ -566,7 +564,7 @@ export function generateAPKKey(options: APKUploadOptions): string {
  */
 export async function getAPKUploadUrl(
   storage: StorageAdapter,
-  options: APKUploadOptions & { expiresIn?: number }
+  options: APKUploadOptions & { expiresIn?: number },
 ): Promise<PresignedUploadResult> {
   const key = generateAPKKey(options);
 
@@ -577,7 +575,7 @@ export async function getAPKUploadUrl(
     expiresIn: options.expiresIn,
     metadata: {
       'package-name': options.packageName,
-      'version': options.version,
+      version: options.version,
       'version-code': options.versionCode.toString(),
       ...(options.releaseNotes && { 'release-notes': options.releaseNotes }),
     },

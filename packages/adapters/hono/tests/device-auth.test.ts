@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { MDMInstance } from '@openmdm/core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { honoAdapter } from '../src/index';
 
 /**

@@ -392,12 +392,12 @@ export type CommandType =
   | 'getLocation'
   | 'setVolume'
   | 'sendNotification'
-  | 'whitelistBattery'      // Whitelist app from battery optimization (Doze)
-  | 'enablePermissiveMode'  // Enable permissive mode for debugging
-  | 'setTimeZone'           // Set device timezone
-  | 'enableAdb'             // Enable/disable ADB debugging
-  | 'rollbackApp'           // Rollback to previous app version
-  | 'updateAgent'           // Update MDM agent to a new version
+  | 'whitelistBattery' // Whitelist app from battery optimization (Doze)
+  | 'enablePermissiveMode' // Enable permissive mode for debugging
+  | 'setTimeZone' // Set device timezone
+  | 'enableAdb' // Enable/disable ADB debugging
+  | 'rollbackApp' // Rollback to previous app version
+  | 'updateAgent' // Update MDM agent to a new version
   | 'custom';
 
 export type CommandStatus =
@@ -524,14 +524,7 @@ export interface UpdateGroupInput {
 // Enrollment Types
 // ============================================
 
-export type EnrollmentMethod =
-  | 'qr'
-  | 'nfc'
-  | 'zero-touch'
-  | 'knox'
-  | 'manual'
-  | 'app-only'
-  | 'adb';
+export type EnrollmentMethod = 'qr' | 'nfc' | 'zero-touch' | 'knox' | 'manual' | 'app-only' | 'adb';
 
 export interface EnrollmentRequest {
   // Device identifiers (at least one required)
@@ -1243,10 +1236,7 @@ export interface PluginRoute {
   admin?: boolean;
 }
 
-export type PluginMiddleware = (
-  context: unknown,
-  next: () => Promise<unknown>
-) => Promise<unknown>;
+export type PluginMiddleware = (context: unknown, next: () => Promise<unknown>) => Promise<unknown>;
 
 // ============================================
 // MDM Instance Interface
@@ -1504,7 +1494,17 @@ export interface TenantStats {
 // ============================================
 
 export type PermissionAction = 'create' | 'read' | 'update' | 'delete' | 'manage' | '*';
-export type PermissionResource = 'devices' | 'policies' | 'apps' | 'groups' | 'commands' | 'users' | 'roles' | 'tenants' | 'audit' | '*';
+export type PermissionResource =
+  | 'devices'
+  | 'policies'
+  | 'apps'
+  | 'groups'
+  | 'commands'
+  | 'users'
+  | 'roles'
+  | 'tenants'
+  | 'audit'
+  | '*';
 
 export interface Permission {
   action: PermissionAction;
@@ -1586,7 +1586,19 @@ export interface UserListResult {
 // Audit Types
 // ============================================
 
-export type AuditAction = 'create' | 'read' | 'update' | 'delete' | 'login' | 'logout' | 'enroll' | 'unenroll' | 'command' | 'export' | 'import' | 'custom';
+export type AuditAction =
+  | 'create'
+  | 'read'
+  | 'update'
+  | 'delete'
+  | 'login'
+  | 'logout'
+  | 'enroll'
+  | 'unenroll'
+  | 'command'
+  | 'export'
+  | 'import'
+  | 'custom';
 
 export interface AuditLog {
   id: string;
@@ -1837,13 +1849,16 @@ export interface CommandSuccessRates {
     failed: number;
     successRate: number;
   };
-  byType: Record<string, {
-    total: number;
-    completed: number;
-    failed: number;
-    successRate: number;
-    avgExecutionTimeMs?: number;
-  }>;
+  byType: Record<
+    string,
+    {
+      total: number;
+      completed: number;
+      failed: number;
+      successRate: number;
+      avgExecutionTimeMs?: number;
+    }
+  >;
   last24h: {
     total: number;
     completed: number;
@@ -1919,9 +1934,22 @@ export interface AuthorizationManager {
   assignRole(userId: string, roleId: string): Promise<void>;
   removeRole(userId: string, roleId: string): Promise<void>;
   getUserRoles(userId: string): Promise<Role[]>;
-  can(userId: string, action: PermissionAction, resource: PermissionResource, resourceId?: string): Promise<boolean>;
-  canAny(userId: string, permissions: Array<{ action: PermissionAction; resource: PermissionResource }>): Promise<boolean>;
-  requirePermission(userId: string, action: PermissionAction, resource: PermissionResource, resourceId?: string): Promise<void>;
+  can(
+    userId: string,
+    action: PermissionAction,
+    resource: PermissionResource,
+    resourceId?: string,
+  ): Promise<boolean>;
+  canAny(
+    userId: string,
+    permissions: Array<{ action: PermissionAction; resource: PermissionResource }>,
+  ): Promise<boolean>;
+  requirePermission(
+    userId: string,
+    action: PermissionAction,
+    resource: PermissionResource,
+    resourceId?: string,
+  ): Promise<void>;
   isAdmin(userId: string): Promise<boolean>;
 }
 
@@ -1974,7 +2002,7 @@ export interface DashboardManager {
 // ============================================
 
 export type EventHandler<T extends EventType> = (
-  event: MDMEvent<EventPayloadMap[T]>
+  event: MDMEvent<EventPayloadMap[T]>,
 ) => Promise<void> | void;
 
 export interface EventPayloadMap {
@@ -2013,7 +2041,7 @@ export class MDMError extends Error {
     message: string,
     public code: string,
     public statusCode: number = 500,
-    public details?: unknown
+    public details?: unknown,
   ) {
     super(message);
     this.name = 'MDMError';

@@ -18,14 +18,14 @@
  * ```
  */
 
-import * as admin from 'firebase-admin';
 import type {
+  DatabaseAdapter,
   PushAdapter,
+  PushBatchResult,
   PushMessage,
   PushResult,
-  PushBatchResult,
-  DatabaseAdapter,
 } from '@openmdm/core';
+import * as admin from 'firebase-admin';
 
 export interface FCMAdapterOptions {
   /**
@@ -134,10 +134,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
   /**
    * Build FCM message from OpenMDM push message
    */
-  function buildMessage(
-    token: string,
-    message: PushMessage
-  ): admin.messaging.Message {
+  function buildMessage(token: string, message: PushMessage): admin.messaging.Message {
     const fcmMessage: admin.messaging.Message = {
       token,
       android: {
@@ -189,9 +186,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
         const fcmMessage = buildMessage(token, message);
         const messageId = await messaging.send(fcmMessage);
 
-        console.log(
-          `[OpenMDM FCM] Sent to ${deviceId}: ${message.type} (${messageId})`
-        );
+        console.log(`[OpenMDM FCM] Sent to ${deviceId}: ${message.type} (${messageId})`);
 
         return {
           success: true,
@@ -219,10 +214,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
       }
     },
 
-    async sendBatch(
-      deviceIds: string[],
-      message: PushMessage
-    ): Promise<PushBatchResult> {
+    async sendBatch(deviceIds: string[], message: PushMessage): Promise<PushBatchResult> {
       const results: Array<{ deviceId: string; result: PushResult }> = [];
       let successCount = 0;
       let failureCount = 0;
@@ -305,9 +297,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
           });
         }
 
-        console.log(
-          `[OpenMDM FCM] Batch sent: ${successCount} success, ${failureCount} failed`
-        );
+        console.log(`[OpenMDM FCM] Batch sent: ${successCount} success, ${failureCount} failed`);
       } catch (error: any) {
         console.error('[OpenMDM FCM] Batch send error:', error);
 
@@ -385,9 +375,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
  * Expects GOOGLE_APPLICATION_CREDENTIALS environment variable
  * or FIREBASE_PROJECT_ID for application default credentials
  */
-export function fcmPushAdapterFromEnv(
-  options?: Partial<FCMAdapterOptions>
-): PushAdapter {
+export function fcmPushAdapterFromEnv(options?: Partial<FCMAdapterOptions>): PushAdapter {
   return fcmPushAdapter({
     ...options,
     credential: admin.credential.applicationDefault(),
@@ -400,7 +388,7 @@ export function fcmPushAdapterFromEnv(
  */
 export function fcmPushAdapterFromServiceAccount(
   serviceAccount: admin.ServiceAccount | string,
-  options?: Partial<FCMAdapterOptions>
+  options?: Partial<FCMAdapterOptions>,
 ): PushAdapter {
   const credential =
     typeof serviceAccount === 'string'

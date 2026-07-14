@@ -5,14 +5,8 @@
  */
 
 import { createHmac, randomUUID } from 'crypto';
-import type {
-  WebhookConfig,
-  WebhookEndpoint,
-  EventType,
-  MDMEvent,
-  Logger,
-} from './types';
 import { createSilentLogger } from './logger';
+import type { EventType, Logger, MDMEvent, WebhookConfig, WebhookEndpoint } from './types';
 
 // ============================================
 // Types
@@ -105,17 +99,14 @@ export function createWebhookManager(
    * Calculate exponential backoff delay
    */
   function getBackoffDelay(retryCount: number): number {
-    const delay = retryConfig.initialDelay * Math.pow(2, retryCount);
+    const delay = retryConfig.initialDelay * 2 ** retryCount;
     return Math.min(delay, retryConfig.maxDelay);
   }
 
   /**
    * Check if an endpoint should receive this event
    */
-  function shouldDeliverToEndpoint(
-    endpoint: WebhookEndpoint,
-    eventType: EventType
-  ): boolean {
+  function shouldDeliverToEndpoint(endpoint: WebhookEndpoint, eventType: EventType): boolean {
     if (!endpoint.enabled) {
       return false;
     }
@@ -133,7 +124,7 @@ export function createWebhookManager(
    */
   async function deliverToEndpoint(
     endpoint: WebhookEndpoint,
-    payload: WebhookPayload
+    payload: WebhookPayload,
   ): Promise<WebhookDeliveryResult> {
     const payloadString = JSON.stringify(payload);
     let lastError: string | undefined;
@@ -213,7 +204,7 @@ export function createWebhookManager(
   return {
     async deliver<T>(event: MDMEvent<T>): Promise<WebhookDeliveryResult[]> {
       const matchingEndpoints = Array.from(endpoints.values()).filter((ep) =>
-        shouldDeliverToEndpoint(ep, event.type)
+        shouldDeliverToEndpoint(ep, event.type),
       );
 
       if (matchingEndpoints.length === 0) {
@@ -230,7 +221,7 @@ export function createWebhookManager(
 
       // Deliver to all matching endpoints in parallel
       const deliveryPromises = matchingEndpoints.map((endpoint) =>
-        deliverToEndpoint(endpoint, payload as WebhookPayload)
+        deliverToEndpoint(endpoint, payload as WebhookPayload),
       );
 
       const results = await Promise.all(deliveryPromises);
@@ -305,11 +296,9 @@ export function createWebhookManager(
 export function verifyWebhookSignature(
   payload: string,
   signature: string,
-  secret: string
+  secret: string,
 ): boolean {
-  const expectedSignature = `sha256=${createHmac('sha256', secret)
-    .update(payload)
-    .digest('hex')}`;
+  const expectedSignature = `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`;
 
   // Constant-time comparison
   if (signature.length !== expectedSignature.length) {

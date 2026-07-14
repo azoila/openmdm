@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHmac } from 'crypto';
-import { createWebhookManager, verifyWebhookSignature } from '../src/webhooks';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MDMEvent } from '../src/types';
+import { createWebhookManager, verifyWebhookSignature } from '../src/webhooks';
 
 const SECRET = 'webhook-signing-secret';
 
@@ -18,16 +18,14 @@ function buildEvent(): MDMEvent<{ deviceId: string }> {
 describe('verifyWebhookSignature', () => {
   it('accepts a correctly signed payload', () => {
     const payload = '{"hello":"world"}';
-    const signature =
-      'sha256=' + createHmac('sha256', SECRET).update(payload).digest('hex');
+    const signature = 'sha256=' + createHmac('sha256', SECRET).update(payload).digest('hex');
     expect(verifyWebhookSignature(payload, signature, SECRET)).toBe(true);
   });
 
   it('rejects a payload signed with a different secret', () => {
     const payload = '{"hello":"world"}';
     const signature =
-      'sha256=' +
-      createHmac('sha256', 'other-secret').update(payload).digest('hex');
+      'sha256=' + createHmac('sha256', 'other-secret').update(payload).digest('hex');
     expect(verifyWebhookSignature(payload, signature, SECRET)).toBe(false);
   });
 
@@ -37,9 +35,7 @@ describe('verifyWebhookSignature', () => {
   });
 
   it('rejects tampered payloads', () => {
-    const signature =
-      'sha256=' +
-      createHmac('sha256', SECRET).update('{"a":1}').digest('hex');
+    const signature = 'sha256=' + createHmac('sha256', SECRET).update('{"a":1}').digest('hex');
     expect(verifyWebhookSignature('{"a":2}', signature, SECRET)).toBe(false);
   });
 
@@ -48,9 +44,7 @@ describe('verifyWebhookSignature', () => {
     const rawHex = createHmac('sha256', SECRET).update(payload).digest('hex');
     // Without prefix should not match
     expect(verifyWebhookSignature(payload, rawHex, SECRET)).toBe(false);
-    expect(
-      verifyWebhookSignature(payload, `sha256=${rawHex}`, SECRET)
-    ).toBe(true);
+    expect(verifyWebhookSignature(payload, `sha256=${rawHex}`, SECRET)).toBe(true);
   });
 });
 
@@ -152,8 +146,7 @@ describe('createWebhookManager delivery', () => {
     const body = init.body as string;
 
     expect(headers['X-OpenMDM-Signature']).toBeDefined();
-    const expected =
-      'sha256=' + createHmac('sha256', SECRET).update(body).digest('hex');
+    const expected = 'sha256=' + createHmac('sha256', SECRET).update(body).digest('hex');
     expect(headers['X-OpenMDM-Signature']).toBe(expected);
     expect(headers['X-OpenMDM-Event']).toBe('device.enrolled');
     expect(headers['X-OpenMDM-Delivery']).toBeDefined();
@@ -175,10 +168,7 @@ describe('createWebhookManager delivery', () => {
 
     await mgr.deliver(buildEvent());
 
-    const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<
-      string,
-      string
-    >;
+    const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
     expect(headers['X-OpenMDM-Signature']).toBeUndefined();
   });
 
@@ -309,10 +299,7 @@ describe('createWebhookManager delivery', () => {
     });
 
     await mgr.deliver(buildEvent());
-    const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<
-      string,
-      string
-    >;
+    const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
     expect(headers['Authorization']).toBe('Bearer custom-token');
   });
 });

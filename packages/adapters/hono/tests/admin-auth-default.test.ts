@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { MDMInstance } from '@openmdm/core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { honoAdapter } from '../src/index';
 
 /**
@@ -22,9 +22,10 @@ import { honoAdapter } from '../src/index';
  * These tests pin the contract so the footgun can't come back.
  */
 
-function buildMockMDM(
-  overrides: Partial<MDMInstance> = {},
-): { mdm: MDMInstance; warnings: Array<[object, string]> } {
+function buildMockMDM(overrides: Partial<MDMInstance> = {}): {
+  mdm: MDMInstance;
+  warnings: Array<[object, string]>;
+} {
   const warnings: Array<[object, string]> = [];
   const capture = (context: object, message: string) => {
     warnings.push([context, message]);
@@ -83,9 +84,7 @@ describe('honoAdapter admin auth default', () => {
 
     expect(warnings).toHaveLength(1);
     const [context, message] = warnings[0];
-    expect((context as { reason: string }).reason).toBe(
-      'auth-enabled-but-not-configured',
-    );
+    expect((context as { reason: string }).reason).toBe('auth-enabled-but-not-configured');
     // The warning message must name the thing the user forgot.
     expect(message).toContain('mdm.config.auth');
   });
@@ -111,9 +110,7 @@ describe('honoAdapter admin auth default', () => {
 
     expect(warnings).toHaveLength(1);
     const [context, message] = warnings[0];
-    expect((context as { reason: string }).reason).toBe(
-      'auth-explicitly-disabled',
-    );
+    expect((context as { reason: string }).reason).toBe('auth-explicitly-disabled');
     expect(message).toContain('unauthenticated');
   });
 

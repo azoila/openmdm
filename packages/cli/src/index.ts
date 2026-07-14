@@ -12,8 +12,8 @@
  * - push: Test push notifications
  */
 
-import { Command } from 'commander';
 import chalk from 'chalk';
+import { Command } from 'commander';
 import { config as dotenvConfig } from 'dotenv';
 
 // Load environment variables
@@ -62,9 +62,7 @@ program
   });
 
 // Device commands
-const deviceCmd = program
-  .command('device')
-  .description('Device management commands');
+const deviceCmd = program.command('device').description('Device management commands');
 
 deviceCmd
   .command('list')
@@ -123,9 +121,7 @@ deviceCmd
   });
 
 // Policy commands
-const policyCmd = program
-  .command('policy')
-  .description('Policy management commands');
+const policyCmd = program.command('policy').description('Policy management commands');
 
 policyCmd
   .command('list')
@@ -163,9 +159,7 @@ policyCmd
   });
 
 // Enrollment commands
-const enrollCmd = program
-  .command('enroll')
-  .description('Device enrollment commands');
+const enrollCmd = program.command('enroll').description('Device enrollment commands');
 
 enrollCmd
   .command('qr')

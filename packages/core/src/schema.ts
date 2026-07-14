@@ -151,10 +151,7 @@ export const mdmSchema: SchemaDefinition = {
         created_at: { type: 'datetime', default: 'now' },
         updated_at: { type: 'datetime', default: 'now' },
       },
-      indexes: [
-        { columns: ['name'] },
-        { columns: ['is_default'] },
-      ],
+      indexes: [{ columns: ['name'] }, { columns: ['is_default'] }],
     },
 
     // ----------------------------------------
@@ -269,11 +266,7 @@ export const mdmSchema: SchemaDefinition = {
         created_at: { type: 'datetime', default: 'now' },
         updated_at: { type: 'datetime', default: 'now' },
       },
-      indexes: [
-        { columns: ['name'] },
-        { columns: ['policy_id'] },
-        { columns: ['parent_id'] },
-      ],
+      indexes: [{ columns: ['name'] }, { columns: ['policy_id'] }, { columns: ['parent_id'] }],
     },
 
     // ----------------------------------------
@@ -291,10 +284,7 @@ export const mdmSchema: SchemaDefinition = {
         },
         created_at: { type: 'datetime', default: 'now' },
       },
-      indexes: [
-        { columns: ['device_id', 'group_id'], unique: true },
-        { columns: ['group_id'] },
-      ],
+      indexes: [{ columns: ['device_id', 'group_id'], unique: true }, { columns: ['group_id'] }],
     },
 
     // ----------------------------------------
@@ -347,10 +337,7 @@ export const mdmSchema: SchemaDefinition = {
         is_required: { type: 'boolean', default: false },
         created_at: { type: 'datetime', default: 'now' },
       },
-      indexes: [
-        { columns: ['application_id'] },
-        { columns: ['target_type', 'target_id'] },
-      ],
+      indexes: [{ columns: ['application_id'] }, { columns: ['target_type', 'target_id'] }],
     },
 
     // ----------------------------------------
@@ -430,9 +417,7 @@ export const mdmSchema: SchemaDefinition = {
         created_at: { type: 'datetime', default: 'now' },
         updated_at: { type: 'datetime', default: 'now' },
       },
-      indexes: [
-        { columns: ['enabled'] },
-      ],
+      indexes: [{ columns: ['enabled'] }],
     },
 
     // ----------------------------------------
@@ -485,10 +470,7 @@ export const mdmSchema: SchemaDefinition = {
         created_at: { type: 'datetime', default: 'now' },
         updated_at: { type: 'datetime', default: 'now' },
       },
-      indexes: [
-        { columns: ['slug'], unique: true },
-        { columns: ['status'] },
-      ],
+      indexes: [{ columns: ['slug'], unique: true }, { columns: ['status'] }],
     },
 
     // ----------------------------------------
@@ -666,11 +648,7 @@ export const mdmSchema: SchemaDefinition = {
         error: { type: 'text', nullable: true },
         details: { type: 'json', nullable: true },
       },
-      indexes: [
-        { columns: ['task_id'] },
-        { columns: ['status'] },
-        { columns: ['started_at'] },
-      ],
+      indexes: [{ columns: ['task_id'] }, { columns: ['status'] }, { columns: ['started_at'] }],
     },
 
     // ----------------------------------------
@@ -729,10 +707,7 @@ export const mdmSchema: SchemaDefinition = {
         created_at: { type: 'datetime', default: 'now' },
         updated_at: { type: 'datetime', default: 'now' },
       },
-      indexes: [
-        { columns: ['plugin_name', 'key'], unique: true },
-        { columns: ['plugin_name'] },
-      ],
+      indexes: [{ columns: ['plugin_name', 'key'], unique: true }, { columns: ['plugin_name'] }],
     },
   },
 };
@@ -788,7 +763,7 @@ export function camelToSnake(str: string): string {
  * Transform object keys from snake_case to camelCase
  */
 export function transformToCamelCase<T extends Record<string, unknown>>(
-  obj: T
+  obj: T,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
@@ -801,7 +776,7 @@ export function transformToCamelCase<T extends Record<string, unknown>>(
  * Transform object keys from camelCase to snake_case
  */
 export function transformToSnakeCase<T extends Record<string, unknown>>(
-  obj: T
+  obj: T,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {

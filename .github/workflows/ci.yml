@@ -37,7 +37,6 @@ jobs:
 
       - name: Lint
         run: pnpm lint
-        continue-on-error: true
 
   test:
     name: Test
@@ -144,23 +143,3 @@ jobs:
         env:
           DATABASE_URL: postgres://openmdm:openmdm@localhost:54329/openmdm_test
         run: pnpm test:e2e
-
-  # android-build:
-  #   name: Build Android Agent
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Setup Java
-  #       uses: actions/setup-java@v4
-  #       with:
-  #         distribution: 'temurin'
-  #         java-version: '17'
-  #
-  #     - name: Setup Android SDK
-  #       uses: android-actions/setup-android@v3
-  #
-  #     - name: Build Android Agent
-  #       working-directory: apps/android-agent
-  #       run: ./gradlew assembleDebug

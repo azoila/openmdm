@@ -25,7 +25,7 @@
  * @see docs/proposals/phase-2b-rollout for the Android + rollout story
  */
 
-import { createPublicKey, verify as cryptoVerify, KeyObject } from 'crypto';
+import { createPublicKey, verify as cryptoVerify, type KeyObject } from 'crypto';
 import type { Device, DeviceIdentityVerification, MDMInstance } from './types';
 
 // ============================================
@@ -65,19 +65,14 @@ export function importPublicKeyFromSpki(spkiBase64: string): KeyObject {
     });
     const asymmetricKeyType = key.asymmetricKeyType;
     if (asymmetricKeyType !== 'ec') {
-      throw new InvalidPublicKeyError(
-        `Expected EC key, got ${asymmetricKeyType ?? 'unknown'}`,
-      );
+      throw new InvalidPublicKeyError(`Expected EC key, got ${asymmetricKeyType ?? 'unknown'}`);
     }
-    const curve = (key.asymmetricKeyDetails as { namedCurve?: string } | undefined)
-      ?.namedCurve;
+    const curve = (key.asymmetricKeyDetails as { namedCurve?: string } | undefined)?.namedCurve;
     if (curve && curve !== 'prime256v1' && curve !== 'P-256') {
       // Node exposes the curve name as `prime256v1` (the OpenSSL spelling)
       // for EC P-256. Accept both for forward-compat but reject anything
       // else loudly — weaker curves should not silently verify.
-      throw new InvalidPublicKeyError(
-        `Unsupported EC curve: ${curve}. Only P-256 is accepted.`,
-      );
+      throw new InvalidPublicKeyError(`Unsupported EC curve: ${curve}. Only P-256 is accepted.`);
     }
     return key;
   } catch (err) {
@@ -107,8 +102,7 @@ export function verifyEcdsaSignature(
   message: string,
   signatureBase64: string,
 ): boolean {
-  const key =
-    typeof publicKey === 'string' ? importPublicKeyFromSpki(publicKey) : publicKey;
+  const key = typeof publicKey === 'string' ? importPublicKeyFromSpki(publicKey) : publicKey;
   let signatureBuffer: Buffer;
   try {
     signatureBuffer = Buffer.from(signatureBase64, 'base64');
@@ -253,24 +247,18 @@ export async function verifyDeviceRequest(opts: {
 
   let verified: boolean;
   try {
-    verified = verifyEcdsaSignature(
-      device.publicKey,
-      opts.canonicalMessage,
-      opts.signatureBase64,
-    );
+    verified = verifyEcdsaSignature(device.publicKey, opts.canonicalMessage, opts.signatureBase64);
   } catch (err) {
     // A pinned key that fails to parse is a data-integrity problem,
     // not a forged request. We log it through the mdm logger so
     // operators can see it, then treat the request as unverified.
-    opts.mdm.logger
-      .child({ component: 'device-identity' })
-      .error(
-        {
-          deviceId: opts.deviceId,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'Pinned public key failed to parse',
-      );
+    opts.mdm.logger.child({ component: 'device-identity' }).error(
+      {
+        deviceId: opts.deviceId,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      'Pinned public key failed to parse',
+    );
     return { ok: false, reason: 'signature-invalid', device };
   }
 
@@ -314,9 +302,7 @@ export class PublicKeyMismatchError extends Error {
   readonly code = 'PUBLIC_KEY_MISMATCH';
 
   constructor(public readonly deviceId: string) {
-    super(
-      `Device ${deviceId} is already enrolled with a different pinned public key`,
-    );
+    super(`Device ${deviceId} is already enrolled with a different pinned public key`);
     this.name = 'PublicKeyMismatchError';
   }
 }

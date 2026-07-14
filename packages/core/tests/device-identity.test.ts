@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeAll } from 'vitest';
-import { generateKeyPairSync, sign as cryptoSign, createPrivateKey } from 'crypto';
+import { createPrivateKey, sign as cryptoSign, generateKeyPairSync } from 'crypto';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
+  canonicalDeviceRequestMessage,
+  canonicalEnrollmentMessage,
+  InvalidPublicKeyError,
   importPublicKeyFromSpki,
   verifyEcdsaSignature,
-  canonicalEnrollmentMessage,
-  canonicalDeviceRequestMessage,
-  InvalidPublicKeyError,
 } from '../src/device-identity';
 
 /**
@@ -62,9 +62,7 @@ describe('importPublicKeyFromSpki', () => {
   it('throws InvalidPublicKeyError on non-base64 garbage', () => {
     // A string that base64-decodes to bytes that are not a valid SPKI
     // should throw, not return null.
-    expect(() => importPublicKeyFromSpki('not!valid!base64!!!')).toThrow(
-      InvalidPublicKeyError,
-    );
+    expect(() => importPublicKeyFromSpki('not!valid!base64!!!')).toThrow(InvalidPublicKeyError);
   });
 
   it('throws InvalidPublicKeyError on truncated SPKI', () => {
@@ -124,18 +122,14 @@ describe('verifyEcdsaSignature', () => {
 
   it('rejects a malformed (non-DER) signature without throwing', () => {
     const garbage = Buffer.from([0x00, 0x01, 0x02, 0x03]).toString('base64');
-    expect(() =>
-      verifyEcdsaSignature(keypair.publicKeySpki, 'msg', garbage),
-    ).not.toThrow();
+    expect(() => verifyEcdsaSignature(keypair.publicKeySpki, 'msg', garbage)).not.toThrow();
     expect(verifyEcdsaSignature(keypair.publicKeySpki, 'msg', garbage)).toBe(false);
   });
 
   it('throws on an invalid public key (not a verify failure)', () => {
     // Distinction matters: a malformed public key is a caller bug,
     // a bad signature is an attack. They should feel different.
-    expect(() => verifyEcdsaSignature('garbage', 'msg', 'sig')).toThrow(
-      InvalidPublicKeyError,
-    );
+    expect(() => verifyEcdsaSignature('garbage', 'msg', 'sig')).toThrow(InvalidPublicKeyError);
   });
 
   it('accepts a pre-imported KeyObject for hot paths', () => {
@@ -165,9 +159,7 @@ describe('canonicalEnrollmentMessage', () => {
       timestamp: '2026-04-15T12:00:00Z',
       challenge: 'CHAL',
     });
-    expect(msg).toBe(
-      'PK|Pixel 7|Google|14|SN1|IMEI1|aa:bb|android-1|qr|2026-04-15T12:00:00Z|CHAL',
-    );
+    expect(msg).toBe('PK|Pixel 7|Google|14|SN1|IMEI1|aa:bb|android-1|qr|2026-04-15T12:00:00Z|CHAL');
   });
 
   it('coerces missing optional identifiers to empty strings', () => {

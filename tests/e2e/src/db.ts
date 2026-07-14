@@ -1,14 +1,13 @@
+import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { sql } from 'drizzle-orm';
 import {
-  mdmPluginStorage,
   mdmEnrollmentChallenges,
+  mdmPluginStorage,
 } from '../../../packages/adapters/drizzle/src/postgres';
 
 export const DATABASE_URL =
-  process.env.DATABASE_URL ??
-  'postgres://openmdm:openmdm@localhost:54329/openmdm_test';
+  process.env.DATABASE_URL ?? 'postgres://openmdm:openmdm@localhost:54329/openmdm_test';
 
 export type TestDB = ReturnType<typeof drizzle>;
 
