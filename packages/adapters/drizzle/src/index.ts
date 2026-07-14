@@ -20,54 +20,54 @@
  * ```
  */
 
-import { eq, and, or, like, inArray, desc, sql, isNull, lt, type SQL } from 'drizzle-orm';
-import { nanoid } from 'nanoid';
 import type {
+  Application,
+  AppRollback,
+  AppVersion,
+  Command,
+  CommandFilter,
+  CreateApplicationInput,
+  CreateAppRollbackInput,
+  CreateDeviceInput,
+  CreateGroupInput,
+  CreatePolicyInput,
   DatabaseAdapter,
   Device,
   DeviceFilter,
   DeviceListResult,
-  CreateDeviceInput,
-  UpdateDeviceInput,
-  Policy,
-  CreatePolicyInput,
-  UpdatePolicyInput,
-  Application,
-  CreateApplicationInput,
-  UpdateApplicationInput,
-  Command,
-  SendCommandInput,
-  CommandFilter,
-  MDMEvent,
+  DeviceLocation,
+  EnrollmentChallenge,
   EventFilter,
   Group,
-  CreateGroupInput,
-  UpdateGroupInput,
+  InstalledApp,
+  MDMEvent,
+  Policy,
+  PolicySettings,
   PushToken,
   RegisterPushTokenInput,
-  PolicySettings,
-  InstalledApp,
-  DeviceLocation,
-  AppVersion,
-  AppRollback,
-  CreateAppRollbackInput,
-  EnrollmentChallenge,
+  SendCommandInput,
+  UpdateApplicationInput,
+  UpdateDeviceInput,
+  UpdateGroupInput,
+  UpdatePolicyInput,
 } from '@openmdm/core';
+import { and, desc, eq, inArray, isNull, like, lt, or, type SQL, sql } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
 
 // Import postgres schema types
 import type {
-  mdmDevices,
-  mdmPolicies,
   mdmApplications,
+  mdmAppVersions,
   mdmCommands,
+  mdmDeviceGroups,
+  mdmDevices,
+  mdmEnrollmentChallenges,
   mdmEvents,
   mdmGroups,
-  mdmDeviceGroups,
-  mdmPushTokens,
-  mdmAppVersions,
-  mdmRollbacks,
   mdmPluginStorage,
-  mdmEnrollmentChallenges,
+  mdmPolicies,
+  mdmPushTokens,
+  mdmRollbacks,
 } from './postgres';
 
 // Type for Drizzle database instance
@@ -108,10 +108,7 @@ export interface DrizzleAdapterOptions {
 /**
  * Create a Drizzle database adapter for OpenMDM
  */
-export function drizzleAdapter(
-  db: DrizzleDB,
-  options: DrizzleAdapterOptions
-): DatabaseAdapter {
+export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): DatabaseAdapter {
   const { tables } = options;
   const {
     devices,
@@ -285,17 +282,11 @@ export function drizzleAdapter(
     // ============================================
 
     async findDevice(id: string): Promise<Device | null> {
-      const result = await (db as any)
-        .select()
-        .from(devices)
-        .where(eq(devices.id, id))
-        .limit(1);
+      const result = await (db as any).select().from(devices).where(eq(devices.id, id)).limit(1);
       return result[0] ? toDevice(result[0]) : null;
     },
 
-    async findDeviceByEnrollmentId(
-      enrollmentId: string
-    ): Promise<Device | null> {
+    async findDeviceByEnrollmentId(enrollmentId: string): Promise<Device | null> {
       const result = await (db as any)
         .select()
         .from(devices)
@@ -332,8 +323,8 @@ export function drizzleAdapter(
             like(devices.model, searchPattern),
             like(devices.manufacturer, searchPattern),
             like(devices.enrollmentId, searchPattern),
-            like(devices.serialNumber, searchPattern)
-          )
+            like(devices.serialNumber, searchPattern),
+          ),
         );
       }
 
@@ -349,10 +340,7 @@ export function drizzleAdapter(
       const total = Number(countResult[0]?.count ?? 0);
 
       // Get paginated results
-      const result = await query
-        .orderBy(desc(devices.createdAt))
-        .limit(limit)
-        .offset(offset);
+      const result = await query.orderBy(desc(devices.createdAt)).limit(limit).offset(offset);
 
       return {
         devices: result.map(toDevice),
@@ -400,25 +388,18 @@ export function drizzleAdapter(
       if (data.policyId !== undefined) updateData.policyId = data.policyId;
       if (data.agentVersion !== undefined) updateData.agentVersion = data.agentVersion;
       if (data.model !== undefined) updateData.model = data.model;
-      if (data.manufacturer !== undefined)
-        updateData.manufacturer = data.manufacturer;
+      if (data.manufacturer !== undefined) updateData.manufacturer = data.manufacturer;
       if (data.osVersion !== undefined) updateData.osVersion = data.osVersion;
-      if (data.batteryLevel !== undefined)
-        updateData.batteryLevel = data.batteryLevel;
-      if (data.storageUsed !== undefined)
-        updateData.storageUsed = data.storageUsed;
-      if (data.storageTotal !== undefined)
-        updateData.storageTotal = data.storageTotal;
-      if (data.lastHeartbeat !== undefined)
-        updateData.lastHeartbeat = data.lastHeartbeat;
+      if (data.batteryLevel !== undefined) updateData.batteryLevel = data.batteryLevel;
+      if (data.storageUsed !== undefined) updateData.storageUsed = data.storageUsed;
+      if (data.storageTotal !== undefined) updateData.storageTotal = data.storageTotal;
+      if (data.lastHeartbeat !== undefined) updateData.lastHeartbeat = data.lastHeartbeat;
       if (data.lastSync !== undefined) updateData.lastSync = data.lastSync;
-      if (data.installedApps !== undefined)
-        updateData.installedApps = data.installedApps;
+      if (data.installedApps !== undefined) updateData.installedApps = data.installedApps;
       if (data.tags !== undefined) updateData.tags = data.tags;
       if (data.metadata !== undefined) updateData.metadata = data.metadata;
       if (data.publicKey !== undefined) updateData.publicKey = data.publicKey;
-      if (data.enrollmentMethod !== undefined)
-        updateData.enrollmentMethod = data.enrollmentMethod;
+      if (data.enrollmentMethod !== undefined) updateData.enrollmentMethod = data.enrollmentMethod;
 
       if (data.location) {
         updateData.latitude = data.location.latitude.toString();
@@ -426,10 +407,7 @@ export function drizzleAdapter(
         updateData.locationTimestamp = data.location.timestamp;
       }
 
-      await (db as any)
-        .update(devices)
-        .set(updateData)
-        .where(eq(devices.id, id));
+      await (db as any).update(devices).set(updateData).where(eq(devices.id, id));
 
       return this.findDevice(id) as Promise<Device>;
     },
@@ -448,11 +426,7 @@ export function drizzleAdapter(
     // ============================================
 
     async findPolicy(id: string): Promise<Policy | null> {
-      const result = await (db as any)
-        .select()
-        .from(policies)
-        .where(eq(policies.id, id))
-        .limit(1);
+      const result = await (db as any).select().from(policies).where(eq(policies.id, id)).limit(1);
       return result[0] ? toPolicy(result[0]) : null;
     },
 
@@ -466,10 +440,7 @@ export function drizzleAdapter(
     },
 
     async listPolicies(): Promise<Policy[]> {
-      const result = await (db as any)
-        .select()
-        .from(policies)
-        .orderBy(desc(policies.createdAt));
+      const result = await (db as any).select().from(policies).orderBy(desc(policies.createdAt));
       return result.map(toPolicy);
     },
 
@@ -498,15 +469,11 @@ export function drizzleAdapter(
       };
 
       if (data.name !== undefined) updateData.name = data.name;
-      if (data.description !== undefined)
-        updateData.description = data.description;
+      if (data.description !== undefined) updateData.description = data.description;
       if (data.isDefault !== undefined) updateData.isDefault = data.isDefault;
       if (data.settings !== undefined) updateData.settings = data.settings;
 
-      await (db as any)
-        .update(policies)
-        .set(updateData)
-        .where(eq(policies.id, id));
+      await (db as any).update(policies).set(updateData).where(eq(policies.id, id));
 
       return this.findPolicy(id) as Promise<Policy>;
     },
@@ -530,7 +497,7 @@ export function drizzleAdapter(
 
     async findApplicationByPackage(
       packageName: string,
-      version?: string
+      version?: string,
     ): Promise<Application | null> {
       let query = (db as any)
         .select()
@@ -585,34 +552,25 @@ export function drizzleAdapter(
       return this.findApplication(id) as Promise<Application>;
     },
 
-    async updateApplication(
-      id: string,
-      data: UpdateApplicationInput
-    ): Promise<Application> {
+    async updateApplication(id: string, data: UpdateApplicationInput): Promise<Application> {
       const updateData: Record<string, unknown> = {
         updatedAt: new Date(),
       };
 
       if (data.name !== undefined) updateData.name = data.name;
       if (data.version !== undefined) updateData.version = data.version;
-      if (data.versionCode !== undefined)
-        updateData.versionCode = data.versionCode;
+      if (data.versionCode !== undefined) updateData.versionCode = data.versionCode;
       if (data.url !== undefined) updateData.url = data.url;
       if (data.hash !== undefined) updateData.hash = data.hash;
       if (data.size !== undefined) updateData.size = data.size;
-      if (data.minSdkVersion !== undefined)
-        updateData.minSdkVersion = data.minSdkVersion;
+      if (data.minSdkVersion !== undefined) updateData.minSdkVersion = data.minSdkVersion;
       if (data.showIcon !== undefined) updateData.showIcon = data.showIcon;
-      if (data.runAfterInstall !== undefined)
-        updateData.runAfterInstall = data.runAfterInstall;
+      if (data.runAfterInstall !== undefined) updateData.runAfterInstall = data.runAfterInstall;
       if (data.runAtBoot !== undefined) updateData.runAtBoot = data.runAtBoot;
       if (data.isActive !== undefined) updateData.isActive = data.isActive;
       if (data.metadata !== undefined) updateData.metadata = data.metadata;
 
-      await (db as any)
-        .update(applications)
-        .set(updateData)
-        .where(eq(applications.id, id));
+      await (db as any).update(applications).set(updateData).where(eq(applications.id, id));
 
       return this.findApplication(id) as Promise<Application>;
     },
@@ -626,11 +584,7 @@ export function drizzleAdapter(
     // ============================================
 
     async findCommand(id: string): Promise<Command | null> {
-      const result = await (db as any)
-        .select()
-        .from(commands)
-        .where(eq(commands.id, id))
-        .limit(1);
+      const result = await (db as any).select().from(commands).where(eq(commands.id, id)).limit(1);
       return result[0] ? toCommand(result[0]) : null;
     },
 
@@ -666,10 +620,7 @@ export function drizzleAdapter(
       const limit = filter?.limit ?? 100;
       const offset = filter?.offset ?? 0;
 
-      const result = await query
-        .orderBy(desc(commands.createdAt))
-        .limit(limit)
-        .offset(offset);
+      const result = await query.orderBy(desc(commands.createdAt)).limit(limit).offset(offset);
 
       return result.map(toCommand);
     },
@@ -699,15 +650,10 @@ export function drizzleAdapter(
       if (data.result !== undefined) updateData.result = data.result;
       if (data.error !== undefined) updateData.error = data.error;
       if (data.sentAt !== undefined) updateData.sentAt = data.sentAt;
-      if (data.acknowledgedAt !== undefined)
-        updateData.acknowledgedAt = data.acknowledgedAt;
-      if (data.completedAt !== undefined)
-        updateData.completedAt = data.completedAt;
+      if (data.acknowledgedAt !== undefined) updateData.acknowledgedAt = data.acknowledgedAt;
+      if (data.completedAt !== undefined) updateData.completedAt = data.completedAt;
 
-      await (db as any)
-        .update(commands)
-        .set(updateData)
-        .where(eq(commands.id, id));
+      await (db as any).update(commands).set(updateData).where(eq(commands.id, id));
 
       return this.findCommand(id);
     },
@@ -723,9 +669,7 @@ export function drizzleAdapter(
     // Event Methods
     // ============================================
 
-    async createEvent(
-      data: Omit<MDMEvent, 'id' | 'createdAt'>
-    ): Promise<MDMEvent> {
+    async createEvent(data: Omit<MDMEvent, 'id' | 'createdAt'>): Promise<MDMEvent> {
       const id = generateId();
       const now = new Date();
 
@@ -769,10 +713,7 @@ export function drizzleAdapter(
       const limit = filter?.limit ?? 100;
       const offset = filter?.offset ?? 0;
 
-      const result = await query
-        .orderBy(desc(events.createdAt))
-        .limit(limit)
-        .offset(offset);
+      const result = await query.orderBy(desc(events.createdAt)).limit(limit).offset(offset);
 
       return result.map(toEvent);
     },
@@ -782,19 +723,12 @@ export function drizzleAdapter(
     // ============================================
 
     async findGroup(id: string): Promise<Group | null> {
-      const result = await (db as any)
-        .select()
-        .from(groups)
-        .where(eq(groups.id, id))
-        .limit(1);
+      const result = await (db as any).select().from(groups).where(eq(groups.id, id)).limit(1);
       return result[0] ? toGroup(result[0]) : null;
     },
 
     async listGroups(): Promise<Group[]> {
-      const result = await (db as any)
-        .select()
-        .from(groups)
-        .orderBy(groups.name);
+      const result = await (db as any).select().from(groups).orderBy(groups.name);
       return result.map(toGroup);
     },
 
@@ -824,16 +758,12 @@ export function drizzleAdapter(
       };
 
       if (data.name !== undefined) updateData.name = data.name;
-      if (data.description !== undefined)
-        updateData.description = data.description;
+      if (data.description !== undefined) updateData.description = data.description;
       if (data.policyId !== undefined) updateData.policyId = data.policyId;
       if (data.parentId !== undefined) updateData.parentId = data.parentId;
       if (data.metadata !== undefined) updateData.metadata = data.metadata;
 
-      await (db as any)
-        .update(groups)
-        .set(updateData)
-        .where(eq(groups.id, id));
+      await (db as any).update(groups).set(updateData).where(eq(groups.id, id));
 
       return this.findGroup(id) as Promise<Group>;
     },
@@ -849,9 +779,7 @@ export function drizzleAdapter(
         .innerJoin(devices, eq(deviceGroups.deviceId, devices.id))
         .where(eq(deviceGroups.groupId, groupId));
 
-      return result.map((r: { device: Record<string, unknown> }) =>
-        toDevice(r.device)
-      );
+      return result.map((r: { device: Record<string, unknown> }) => toDevice(r.device));
     },
 
     async addDeviceToGroup(deviceId: string, groupId: string): Promise<void> {
@@ -862,18 +790,10 @@ export function drizzleAdapter(
       });
     },
 
-    async removeDeviceFromGroup(
-      deviceId: string,
-      groupId: string
-    ): Promise<void> {
+    async removeDeviceFromGroup(deviceId: string, groupId: string): Promise<void> {
       await (db as any)
         .delete(deviceGroups)
-        .where(
-          and(
-            eq(deviceGroups.deviceId, deviceId),
-            eq(deviceGroups.groupId, groupId)
-          )
-        );
+        .where(and(eq(deviceGroups.deviceId, deviceId), eq(deviceGroups.groupId, groupId)));
     },
 
     async getDeviceGroups(deviceId: string): Promise<Group[]> {
@@ -883,28 +803,18 @@ export function drizzleAdapter(
         .innerJoin(groups, eq(deviceGroups.groupId, groups.id))
         .where(eq(deviceGroups.deviceId, deviceId));
 
-      return result.map((r: { group: Record<string, unknown> }) =>
-        toGroup(r.group)
-      );
+      return result.map((r: { group: Record<string, unknown> }) => toGroup(r.group));
     },
 
     // ============================================
     // Push Token Methods
     // ============================================
 
-    async findPushToken(
-      deviceId: string,
-      provider: string
-    ): Promise<PushToken | null> {
+    async findPushToken(deviceId: string, provider: string): Promise<PushToken | null> {
       const result = await (db as any)
         .select()
         .from(pushTokens)
-        .where(
-          and(
-            eq(pushTokens.deviceId, deviceId),
-            eq(pushTokens.provider, provider as any)
-          )
-        )
+        .where(and(eq(pushTokens.deviceId, deviceId), eq(pushTokens.provider, provider as any)))
         .limit(1);
       return result[0] ? toPushToken(result[0]) : null;
     },
@@ -944,16 +854,9 @@ export function drizzleAdapter(
       if (provider) {
         await (db as any)
           .delete(pushTokens)
-          .where(
-            and(
-              eq(pushTokens.deviceId, deviceId),
-              eq(pushTokens.provider, provider as any)
-            )
-          );
+          .where(and(eq(pushTokens.deviceId, deviceId), eq(pushTokens.provider, provider as any)));
       } else {
-        await (db as any)
-          .delete(pushTokens)
-          .where(eq(pushTokens.deviceId, deviceId));
+        await (db as any).delete(pushTokens).where(eq(pushTokens.deviceId, deviceId));
       }
     },
 
@@ -972,9 +875,7 @@ export function drizzleAdapter(
             return result.map(toAppVersion);
           },
 
-          async createAppVersion(
-            data: Omit<AppVersion, 'id' | 'createdAt'>
-          ): Promise<AppVersion> {
+          async createAppVersion(data: Omit<AppVersion, 'id' | 'createdAt'>): Promise<AppVersion> {
             const id = generateId();
             const now = new Date();
 
@@ -1002,10 +903,7 @@ export function drizzleAdapter(
             return toAppVersion(result[0]);
           },
 
-          async setMinimumVersion(
-            packageName: string,
-            versionCode: number
-          ): Promise<void> {
+          async setMinimumVersion(packageName: string, versionCode: number): Promise<void> {
             // First, unset all minimum versions for this package
             await (db as any)
               .update(appVersions)
@@ -1019,8 +917,8 @@ export function drizzleAdapter(
               .where(
                 and(
                   eq(appVersions.packageName, packageName),
-                  eq(appVersions.versionCode, versionCode)
-                )
+                  eq(appVersions.versionCode, versionCode),
+                ),
               );
           },
 
@@ -1031,8 +929,8 @@ export function drizzleAdapter(
               .where(
                 and(
                   eq(appVersions.packageName, packageName),
-                  eq(appVersions.isMinimumVersion, true)
-                )
+                  eq(appVersions.isMinimumVersion, true),
+                ),
               )
               .limit(1);
             return result[0] ? toAppVersion(result[0]) : null;
@@ -1060,7 +958,7 @@ export function drizzleAdapter(
             const device = deviceResult[0];
             const installedApps = (device?.installedApps as any[]) || [];
             const currentApp = installedApps.find(
-              (app: any) => app.packageName === data.packageName
+              (app: any) => app.packageName === data.packageName,
             );
 
             // Get target version info
@@ -1070,8 +968,8 @@ export function drizzleAdapter(
               .where(
                 and(
                   eq(appVersions!.packageName, data.packageName),
-                  eq(appVersions!.versionCode, data.toVersionCode)
-                )
+                  eq(appVersions!.versionCode, data.toVersionCode),
+                ),
               )
               .limit(1);
 
@@ -1101,21 +999,14 @@ export function drizzleAdapter(
             return toAppRollback(result[0]);
           },
 
-          async updateRollback(
-            id: string,
-            data: Partial<AppRollback>
-          ): Promise<AppRollback> {
+          async updateRollback(id: string, data: Partial<AppRollback>): Promise<AppRollback> {
             const updateData: Record<string, unknown> = {};
 
             if (data.status !== undefined) updateData.status = data.status;
             if (data.error !== undefined) updateData.error = data.error;
-            if (data.completedAt !== undefined)
-              updateData.completedAt = data.completedAt;
+            if (data.completedAt !== undefined) updateData.completedAt = data.completedAt;
 
-            await (db as any)
-              .update(rollbacks)
-              .set(updateData)
-              .where(eq(rollbacks.id, id));
+            await (db as any).update(rollbacks).set(updateData).where(eq(rollbacks.id, id));
 
             const result = await (db as any)
               .select()
@@ -1163,29 +1054,17 @@ export function drizzleAdapter(
 
     ...(pluginStorage
       ? {
-          async getPluginValue(
-            pluginName: string,
-            key: string
-          ): Promise<unknown> {
+          async getPluginValue(pluginName: string, key: string): Promise<unknown> {
             const rows = await (db as any)
               .select()
               .from(pluginStorage)
-              .where(
-                and(
-                  eq(pluginStorage.pluginName, pluginName),
-                  eq(pluginStorage.key, key)
-                )
-              )
+              .where(and(eq(pluginStorage.pluginName, pluginName), eq(pluginStorage.key, key)))
               .limit(1);
             if (rows.length === 0) return null;
             return rows[0].value;
           },
 
-          async setPluginValue(
-            pluginName: string,
-            key: string,
-            value: unknown
-          ): Promise<void> {
+          async setPluginValue(pluginName: string, key: string, value: unknown): Promise<void> {
             // Postgres upsert: on conflict (plugin_name, key) update value + updated_at.
             // This keeps writes idempotent and last-writer-wins, which matches
             // the semantics the plugin-storage interface promises.
@@ -1207,29 +1086,15 @@ export function drizzleAdapter(
               });
           },
 
-          async deletePluginValue(
-            pluginName: string,
-            key: string
-          ): Promise<void> {
+          async deletePluginValue(pluginName: string, key: string): Promise<void> {
             await (db as any)
               .delete(pluginStorage)
-              .where(
-                and(
-                  eq(pluginStorage.pluginName, pluginName),
-                  eq(pluginStorage.key, key)
-                )
-              );
+              .where(and(eq(pluginStorage.pluginName, pluginName), eq(pluginStorage.key, key)));
           },
 
-          async listPluginKeys(
-            pluginName: string,
-            prefix?: string
-          ): Promise<string[]> {
+          async listPluginKeys(pluginName: string, prefix?: string): Promise<string[]> {
             const whereExpr = prefix
-              ? and(
-                  eq(pluginStorage.pluginName, pluginName),
-                  like(pluginStorage.key, `${prefix}%`)
-                )
+              ? and(eq(pluginStorage.pluginName, pluginName), like(pluginStorage.key, `${prefix}%`))
               : eq(pluginStorage.pluginName, pluginName);
             const rows = await (db as any)
               .select({ key: pluginStorage.key })
@@ -1239,9 +1104,7 @@ export function drizzleAdapter(
           },
 
           async clearPluginData(pluginName: string): Promise<void> {
-            await (db as any)
-              .delete(pluginStorage)
-              .where(eq(pluginStorage.pluginName, pluginName));
+            await (db as any).delete(pluginStorage).where(eq(pluginStorage.pluginName, pluginName));
           },
         }
       : {}),
@@ -1258,9 +1121,7 @@ export function drizzleAdapter(
 
     ...(enrollmentChallenges
       ? {
-          async createEnrollmentChallenge(
-            challenge: EnrollmentChallenge
-          ): Promise<void> {
+          async createEnrollmentChallenge(challenge: EnrollmentChallenge): Promise<void> {
             await (db as any).insert(enrollmentChallenges).values({
               challenge: challenge.challenge,
               expiresAt: challenge.expiresAt,
@@ -1269,9 +1130,7 @@ export function drizzleAdapter(
             });
           },
 
-          async findEnrollmentChallenge(
-            challenge: string
-          ): Promise<EnrollmentChallenge | null> {
+          async findEnrollmentChallenge(challenge: string): Promise<EnrollmentChallenge | null> {
             const rows = await (db as any)
               .select()
               .from(enrollmentChallenges)
@@ -1287,9 +1146,7 @@ export function drizzleAdapter(
             };
           },
 
-          async consumeEnrollmentChallenge(
-            challenge: string
-          ): Promise<EnrollmentChallenge | null> {
+          async consumeEnrollmentChallenge(challenge: string): Promise<EnrollmentChallenge | null> {
             // Conditional UPDATE: the RETURNING clause gives us the
             // row only if the WHERE matched a previously-unused
             // challenge. Two concurrent calls can't both succeed
@@ -1301,8 +1158,8 @@ export function drizzleAdapter(
               .where(
                 and(
                   eq(enrollmentChallenges.challenge, challenge),
-                  isNull(enrollmentChallenges.consumedAt)
-                )
+                  isNull(enrollmentChallenges.consumedAt),
+                ),
               )
               .returning();
             if (rows.length === 0) return null;
@@ -1321,8 +1178,8 @@ export function drizzleAdapter(
               .where(
                 and(
                   lt(enrollmentChallenges.expiresAt, now),
-                  isNull(enrollmentChallenges.consumedAt)
-                )
+                  isNull(enrollmentChallenges.consumedAt),
+                ),
               )
               .returning({ challenge: enrollmentChallenges.challenge });
             return rows.length;
@@ -1342,6 +1199,6 @@ export function drizzleAdapter(
   };
 }
 
+export type { SchemaOptions } from './schema';
 // Re-export schema utilities
 export { DEFAULT_TABLE_PREFIX } from './schema';
-export type { SchemaOptions } from './schema';
