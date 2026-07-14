@@ -5,8 +5,10 @@
  * Similar to how better-auth integrates, MDM becomes part of your app.
  */
 
-import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
 import { createMDM } from '@openmdm/core';
+import { Hono } from 'hono';
+
 // import { drizzleAdapter } from '@openmdm/drizzle-adapter';
 // import { honoPlugin } from '@openmdm/hono';
 // import { kioskPlugin } from '@openmdm/plugins/kiosk';
@@ -24,6 +26,8 @@ const mockDb = {
   commands: new Map<string, any>(),
   events: new Map<string, any>(),
   groups: new Map<string, any>(),
+  deviceGroups: [] as { deviceId: string; groupId: string }[],
+  pushTokens: new Map<string, any>(),
 };
 
 const mockDatabaseAdapter = {
@@ -38,14 +42,24 @@ const mockDatabaseAdapter = {
     return null;
   },
   async listDevices(filter?: any) {
-    const devices = Array.from(mockDb.devices.values());
-    if (!filter) return devices;
-    return devices.filter((d) => {
-      if (filter.status && d.status !== filter.status) return false;
-      if (filter.policyId && d.policyId !== filter.policyId) return false;
-      if (filter.groupId && d.groupId !== filter.groupId) return false;
+    const all = Array.from(mockDb.devices.values()).filter((d) => {
+      if (filter?.status && d.status !== filter.status) return false;
+      if (filter?.policyId && d.policyId !== filter.policyId) return false;
+      if (filter?.groupId && d.groupId !== filter.groupId) return false;
       return true;
     });
+    const offset = filter?.offset ?? 0;
+    const limit = filter?.limit ?? all.length;
+    return {
+      devices: all.slice(offset, offset + limit),
+      total: all.length,
+      limit,
+      offset,
+    };
+  },
+  async countDevices(filter?: any) {
+    const { total } = await this.listDevices(filter);
+    return total;
   },
   async createDevice(data: any) {
     const device = {
@@ -146,9 +160,16 @@ const mockDatabaseAdapter = {
   async findCommand(id: string) {
     return mockDb.commands.get(id) || null;
   },
-  async listCommands(deviceId: string) {
+  async listCommands(filter?: any) {
+    return Array.from(mockDb.commands.values()).filter((c) => {
+      if (filter?.deviceId && c.deviceId !== filter.deviceId) return false;
+      if (filter?.status && c.status !== filter.status) return false;
+      return true;
+    });
+  },
+  async getPendingCommands(deviceId: string) {
     return Array.from(mockDb.commands.values()).filter(
-      (c) => c.deviceId === deviceId
+      (c) => c.deviceId === deviceId && (c.status === 'pending' || c.status === 'sent'),
     );
   },
   async createCommand(data: any) {
@@ -179,10 +200,10 @@ const mockDatabaseAdapter = {
     mockDb.events.set(event.id, event);
     return event;
   },
-  async listEvents(deviceId: string, limit = 100) {
+  async listEvents(filter?: any) {
     return Array.from(mockDb.events.values())
-      .filter((e) => e.deviceId === deviceId)
-      .slice(0, limit);
+      .filter((e) => !filter?.deviceId || e.deviceId === filter.deviceId)
+      .slice(0, filter?.limit ?? 100);
   },
 
   // Groups
@@ -211,6 +232,45 @@ const mockDatabaseAdapter = {
   },
   async deleteGroup(id: string) {
     mockDb.groups.delete(id);
+  },
+  async listDevicesInGroup(groupId: string) {
+    return mockDb.deviceGroups
+      .filter((dg) => dg.groupId === groupId)
+      .map((dg) => mockDb.devices.get(dg.deviceId))
+      .filter(Boolean);
+  },
+  async addDeviceToGroup(deviceId: string, groupId: string) {
+    if (!mockDb.deviceGroups.some((dg) => dg.deviceId === deviceId && dg.groupId === groupId)) {
+      mockDb.deviceGroups.push({ deviceId, groupId });
+    }
+  },
+  async removeDeviceFromGroup(deviceId: string, groupId: string) {
+    mockDb.deviceGroups = mockDb.deviceGroups.filter(
+      (dg) => !(dg.deviceId === deviceId && dg.groupId === groupId),
+    );
+  },
+  async getDeviceGroups(deviceId: string) {
+    return mockDb.deviceGroups
+      .filter((dg) => dg.deviceId === deviceId)
+      .map((dg) => mockDb.groups.get(dg.groupId))
+      .filter(Boolean);
+  },
+
+  // Push tokens
+  async findPushToken(deviceId: string, provider: string) {
+    return mockDb.pushTokens.get(`${deviceId}:${provider}`) || null;
+  },
+  async upsertPushToken(data: any) {
+    const token = { ...data, updatedAt: new Date() };
+    mockDb.pushTokens.set(`${data.deviceId}:${data.provider}`, token);
+    return token;
+  },
+  async deletePushToken(deviceId: string, provider?: string) {
+    for (const key of mockDb.pushTokens.keys()) {
+      if (key.startsWith(`${deviceId}:`) && (!provider || key === `${deviceId}:${provider}`)) {
+        mockDb.pushTokens.delete(key);
+      }
+    }
   },
 };
 
@@ -241,9 +301,7 @@ const mdm = createMDM({
   },
 
   onHeartbeat: async (device, heartbeat) => {
-    console.log(
-      `[MDM] Heartbeat from ${device.enrollmentId}: Battery ${heartbeat.batteryLevel}%`
-    );
+    console.log(`[MDM] Heartbeat from ${device.enrollmentId}: Battery ${heartbeat.batteryLevel}%`);
   },
 
   // Plugins
@@ -338,11 +396,11 @@ mdmApi.post('/heartbeat', async (c) => {
 mdmApi.get('/devices', async (c) => {
   const status = c.req.query('status');
   const policyId = c.req.query('policyId');
-  const devices = await mdm.devices.list({
+  const { devices, total } = await mdm.devices.list({
     status: status as any,
     policyId,
   });
-  return c.json({ devices });
+  return c.json({ devices, total });
 });
 
 mdmApi.get('/devices/:id', async (c) => {
@@ -449,7 +507,7 @@ mdmApi.post('/groups', async (c) => {
 });
 
 mdmApi.get('/groups/:id/devices', async (c) => {
-  const devices = await mdm.groups.listDevices(c.req.param('id'));
+  const devices = await mdm.groups.getDevices(c.req.param('id'));
   return c.json({ devices });
 });
 
@@ -482,6 +540,11 @@ console.log(`
 ║    GET    /mdm/groups           - List groups                ║
 ╚══════════════════════════════════════════════════════════════╝
 `);
+
+// Bun picks up the default export below; on Node we start the server explicitly.
+if (!('Bun' in globalThis)) {
+  serve({ fetch: app.fetch, port });
+}
 
 export default {
   port,
