@@ -132,20 +132,81 @@ async function bootstrapCommandTables(db: TestDB): Promise<void> {
     ALTER TYPE mdm_command_status ADD VALUE IF NOT EXISTS 'expired'
   `);
 
+  // The full column set the drizzle adapter writes on createDevice. Earlier
+  // revisions of this harness carried only the columns the durability tests
+  // touched (they seeded devices with raw SQL); the tenant tests go through
+  // `mdm.devices.create()`, which writes the lot.
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS mdm_devices (
       id VARCHAR(36) PRIMARY KEY,
-      enrollment_id VARCHAR(100) NOT NULL UNIQUE,
+      tenant_id VARCHAR(36),
+      external_id VARCHAR(255),
+      enrollment_id VARCHAR(255) NOT NULL UNIQUE,
       status VARCHAR(20) NOT NULL DEFAULT 'pending',
       model VARCHAR(100),
+      manufacturer VARCHAR(100),
+      os_version VARCHAR(50),
+      serial_number VARCHAR(100),
+      imei VARCHAR(20),
+      mac_address VARCHAR(20),
+      android_id VARCHAR(50),
+      policy_id VARCHAR(36),
+      agent_version VARCHAR(50),
+      public_key TEXT,
+      enrollment_method VARCHAR(20),
+      last_heartbeat TIMESTAMPTZ,
+      last_sync TIMESTAMPTZ,
+      battery_level INTEGER,
+      storage_used BIGINT,
+      storage_total BIGINT,
+      latitude NUMERIC(10, 7),
+      longitude NUMERIC(10, 7),
+      location_timestamp TIMESTAMPTZ,
+      installed_apps JSON,
+      tags JSON,
+      metadata JSON,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
 
+  // Bring databases bootstrapped by an earlier revision of this harness along.
+  for (const column of [
+    sql`tenant_id VARCHAR(36)`,
+    sql`external_id VARCHAR(255)`,
+    sql`manufacturer VARCHAR(100)`,
+    sql`os_version VARCHAR(50)`,
+    sql`serial_number VARCHAR(100)`,
+    sql`imei VARCHAR(20)`,
+    sql`mac_address VARCHAR(20)`,
+    sql`android_id VARCHAR(50)`,
+    sql`policy_id VARCHAR(36)`,
+    sql`agent_version VARCHAR(50)`,
+    sql`public_key TEXT`,
+    sql`enrollment_method VARCHAR(20)`,
+    sql`last_heartbeat TIMESTAMPTZ`,
+    sql`last_sync TIMESTAMPTZ`,
+    sql`battery_level INTEGER`,
+    sql`storage_used BIGINT`,
+    sql`storage_total BIGINT`,
+    sql`latitude NUMERIC(10, 7)`,
+    sql`longitude NUMERIC(10, 7)`,
+    sql`location_timestamp TIMESTAMPTZ`,
+    sql`installed_apps JSON`,
+    sql`tags JSON`,
+    sql`metadata JSON`,
+  ]) {
+    await db.execute(sql`ALTER TABLE mdm_devices ADD COLUMN IF NOT EXISTS ${column}`);
+  }
+
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS mdm_devices_tenant_id_idx ON mdm_devices (tenant_id)
+  `);
+
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS mdm_commands (
       id VARCHAR(36) PRIMARY KEY,
+      tenant_id VARCHAR(36),
       device_id VARCHAR(36) NOT NULL REFERENCES mdm_devices(id) ON DELETE CASCADE,
       type VARCHAR(50) NOT NULL,
       payload JSON,
@@ -162,6 +223,14 @@ async function bootstrapCommandTables(db: TestDB): Promise<void> {
       max_attempts INTEGER NOT NULL DEFAULT 5,
       last_attempt_at TIMESTAMPTZ
     )
+  `);
+
+  await db.execute(sql`
+    ALTER TABLE mdm_commands ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(36)
+  `);
+
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS mdm_commands_tenant_id_idx ON mdm_commands (tenant_id)
   `);
 
   await db.execute(sql`

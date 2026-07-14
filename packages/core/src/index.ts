@@ -25,6 +25,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import { createAuditManager } from './audit';
 import { createAuthorizationManager } from './authorization';
+import { createScopedInstance } from './context';
 import { createDashboardManager } from './dashboard';
 import {
   ChallengeInvalidError,
@@ -75,6 +76,7 @@ import type {
   InstalledApp,
   Logger,
   MDMConfig,
+  MDMContext,
   MDMEvent,
   MDMInstance,
   MDMPlugin,
@@ -87,6 +89,7 @@ import type {
   PushMessage,
   PushResult,
   ScheduleManager,
+  ScopedMDM,
   SendCommandInput,
   TenantManager,
   UpdateApplicationInput,
@@ -107,6 +110,7 @@ import { createWebhookManager } from './webhooks';
 export * from './agent-protocol';
 export { createAuditManager } from './audit';
 export { createAuthorizationManager } from './authorization';
+export { createScopedInstance } from './context';
 export { createDashboardManager } from './dashboard';
 // Device identity (Phase 2b)
 export {
@@ -1615,6 +1619,20 @@ export function createMDM(config: MDMConfig): MDMInstance {
     config,
     on,
     emit,
+    withContext(context: MDMContext): ScopedMDM {
+      return createScopedInstance(context, {
+        database,
+        logger,
+        managers: { devices, policies, apps, commands, groups },
+        // Read the managers off the instance at call time rather than closing
+        // over them: a host that replaces `mdm.authorization` (or a test that
+        // stubs it) must be honoured, not silently ignored.
+        authorization: () => instance.authorization,
+        audit: () => instance.audit,
+        authorizationEnabled: Boolean(config.authorization?.enabled),
+        auditEnabled: Boolean(config.audit?.enabled),
+      });
+    },
     enroll,
     processHeartbeat,
     verifyDeviceToken,

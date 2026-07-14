@@ -70,6 +70,8 @@ export const mdmDevices = pgTable(
   'mdm_devices',
   {
     id: varchar('id', { length: 36 }).primaryKey(),
+    // Owning tenant. Nullable: single-tenant deployments leave it NULL.
+    tenantId: varchar('tenant_id', { length: 36 }),
     externalId: varchar('external_id', { length: 255 }),
     enrollmentId: varchar('enrollment_id', { length: 255 }).notNull().unique(),
     status: deviceStatusEnum('status').notNull().default('pending'),
@@ -120,6 +122,7 @@ export const mdmDevices = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    index('mdm_devices_tenant_id_idx').on(table.tenantId),
     index('mdm_devices_status_idx').on(table.status),
     index('mdm_devices_policy_id_idx').on(table.policyId),
     index('mdm_devices_last_heartbeat_idx').on(table.lastHeartbeat),
@@ -136,6 +139,8 @@ export const mdmPolicies = pgTable(
   'mdm_policies',
   {
     id: varchar('id', { length: 36 }).primaryKey(),
+    // Owning tenant. Nullable: single-tenant deployments leave it NULL.
+    tenantId: varchar('tenant_id', { length: 36 }),
     name: varchar('name', { length: 255 }).notNull(),
     description: text('description'),
     isDefault: boolean('is_default').notNull().default(false),
@@ -157,6 +162,8 @@ export const mdmApplications = pgTable(
   'mdm_applications',
   {
     id: varchar('id', { length: 36 }).primaryKey(),
+    // Owning tenant. Nullable: single-tenant deployments leave it NULL.
+    tenantId: varchar('tenant_id', { length: 36 }),
     name: varchar('name', { length: 255 }).notNull(),
     packageName: varchar('package_name', { length: 255 }).notNull(),
     version: varchar('version', { length: 50 }).notNull(),
@@ -195,6 +202,8 @@ export const mdmCommands = pgTable(
   'mdm_commands',
   {
     id: varchar('id', { length: 36 }).primaryKey(),
+    // Owning tenant. Nullable: single-tenant deployments leave it NULL.
+    tenantId: varchar('tenant_id', { length: 36 }),
     deviceId: varchar('device_id', { length: 36 })
       .notNull()
       .references(() => mdmDevices.id, { onDelete: 'cascade' }),
@@ -220,6 +229,7 @@ export const mdmCommands = pgTable(
     lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
   },
   (table) => [
+    index('mdm_commands_tenant_id_idx').on(table.tenantId),
     index('mdm_commands_device_id_idx').on(table.deviceId),
     index('mdm_commands_status_idx').on(table.status),
     index('mdm_commands_device_status_idx').on(table.deviceId, table.status),
@@ -268,6 +278,8 @@ export const mdmGroups = pgTable(
   'mdm_groups',
   {
     id: varchar('id', { length: 36 }).primaryKey(),
+    // Owning tenant. Nullable: single-tenant deployments leave it NULL.
+    tenantId: varchar('tenant_id', { length: 36 }),
     name: varchar('name', { length: 255 }).notNull(),
     description: text('description'),
     policyId: varchar('policy_id', { length: 36 }).references(() => mdmPolicies.id, {
