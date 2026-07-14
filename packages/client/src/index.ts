@@ -431,6 +431,12 @@ export interface MDMClient {
   /** Get current device configuration */
   getConfig(): Promise<DeviceConfig>;
 
+  /**
+   * Proactively exchange the current device token for a fresh one. Also
+   * happens automatically when a request receives a 401.
+   */
+  refreshToken(): Promise<void>;
+
   /** Get pending commands */
   getPendingCommands(): Promise<Command[]>;
 
@@ -509,9 +515,11 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
         }
 
         if (response.status === 401) {
-          // Token expired or invalid
-          if (state.refreshToken && retry === 0) {
-            // Try to refresh token
+          // Token expired or invalid. Try a one-shot renewal with the
+          // current token — the server accepts recently-expired tokens on
+          // the refresh route (within its renewal grace window). The path
+          // guard prevents recursing when the refresh call itself 401s.
+          if (state.token && retry === 0 && path !== '/agent/refresh-token') {
             await refreshAuthToken();
             return request<T>(path, options, retry + 1);
           }
@@ -554,11 +562,14 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
   }
 
   /**
-   * Refresh authentication token
+   * Exchange the current device token for a fresh one. The current token
+   * travels in the Authorization header (attached by `request`); the server
+   * verifies its signature and accepts it even shortly after expiry, within
+   * the server-side renewal grace window.
    */
   async function refreshAuthToken(): Promise<void> {
-    if (!state.refreshToken) {
-      throw new AuthenticationError('No refresh token available');
+    if (!state.token) {
+      throw new AuthenticationError('No device token available to refresh');
     }
 
     const response = await request<{
@@ -567,7 +578,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
       expiresAt?: string;
     }>('/agent/refresh-token', {
       method: 'POST',
-      body: JSON.stringify({ refreshToken: state.refreshToken }),
+      body: JSON.stringify({}),
     });
 
     state.token = response.token;
@@ -652,6 +663,18 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
       }
 
       return request<DeviceConfig>('/agent/config');
+    },
+
+    /**
+     * Proactively exchange the current device token for a fresh one.
+     * Also happens automatically when a request receives a 401.
+     */
+    async refreshToken(): Promise<void> {
+      if (!this.isEnrolled()) {
+        throw new EnrollmentRequiredError();
+      }
+
+      await refreshAuthToken();
     },
 
     async getPendingCommands(): Promise<Command[]> {

@@ -37,7 +37,14 @@ import type {
 import type { Context, Env, MiddlewareHandler } from 'hono';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { agentOkResponse, agentReauth, agentUnenroll, isAgentV2 } from './agent-envelope';
+import {
+  agentOkResponse,
+  agentReauth,
+  agentRetry,
+  agentUnenroll,
+  isAgentV2,
+} from './agent-envelope';
+import { createRateLimiter, type RateLimitOptions } from './rate-limit';
 
 // Re-export wire-protocol helpers so consumers can build custom
 // agent endpoints without depending directly on @openmdm/core.
@@ -49,6 +56,8 @@ export {
   agentUnenroll,
   isAgentV2,
 } from './agent-envelope';
+export type { RateLimiter, RateLimitOptions } from './rate-limit';
+export { createRateLimiter, defaultRateLimitKey } from './rate-limit';
 
 /**
  * Context variables set by OpenMDM middlewares
@@ -95,6 +104,18 @@ export interface HonoAdapterOptions {
    * Custom error handler
    */
   onError?: (error: Error, c: Context) => Response | Promise<Response>;
+
+  /**
+   * Rate limiting for the unauthenticated enrollment routes
+   * (`POST /agent/enroll`, `GET /agent/enroll/challenge`).
+   *
+   * **Enabled by default** at 60 requests per 60 seconds per client IP
+   * (first `X-Forwarded-For` entry, falling back to `X-Real-Ip`). The
+   * limiter is in-memory and per-process: with N replicas the effective
+   * limit is up to N × max. Deployments that already rate-limit at the
+   * reverse proxy can pass `false` to disable it.
+   */
+  rateLimit?: false | RateLimitOptions;
 
   /**
    * Routes to expose (default: all)
@@ -201,9 +222,12 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
   // rollout.
   const deviceAuth: MiddlewareHandler = async (c, next) => {
     const token = c.req.header('Authorization')?.replace('Bearer ', '');
-    const deviceId = c.req.header('X-Device-Id');
 
-    if (!token && !deviceId) {
+    // A bare `X-Device-Id` header is NOT accepted as identity: device ids
+    // are guessable/enumerable, so honoring the header alone would let
+    // anyone read any device's commands and config. The verified token is
+    // the only identity source.
+    if (!token) {
       if (isAgentV2(c)) {
         c.res = agentReauth(c, 'Device authentication required');
         return;
@@ -211,19 +235,15 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
       throw new HTTPException(401, { message: 'Device authentication required' });
     }
 
-    if (token) {
-      const result = await mdm.verifyDeviceToken(token);
-      if (!result) {
-        if (isAgentV2(c)) {
-          c.res = agentReauth(c, 'Invalid or expired device token');
-          return;
-        }
-        throw new HTTPException(401, { message: 'Invalid device token' });
+    const result = await mdm.verifyDeviceToken(token);
+    if (!result) {
+      if (isAgentV2(c)) {
+        c.res = agentReauth(c, 'Invalid or expired device token');
+        return;
       }
-      c.set('deviceId', result.deviceId);
-    } else if (deviceId) {
-      c.set('deviceId', deviceId);
+      throw new HTTPException(401, { message: 'Invalid device token' });
     }
+    c.set('deviceId', result.deviceId);
 
     await next();
   };
@@ -312,6 +332,24 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
 
   if (routes.enrollment) {
     const enrollment = new Hono<MDMEnv>();
+
+    // Rate limit the two unauthenticated entry points. Everything else
+    // under /agent requires a valid device token, which is its own gate.
+    if (options.rateLimit !== false) {
+      const limiter = createRateLimiter(options.rateLimit);
+      const enrollmentRateLimit: MiddlewareHandler = async (c, next) => {
+        if (!limiter.allow(c)) {
+          if (isAgentV2(c)) {
+            c.res = agentRetry(c, 'Too many enrollment requests — retry later');
+            return;
+          }
+          throw new HTTPException(429, { message: 'Too many enrollment requests' });
+        }
+        await next();
+      };
+      enrollment.use('/enroll', enrollmentRateLimit);
+      enrollment.use('/enroll/challenge', enrollmentRateLimit);
+    }
 
     // Issue a single-use enrollment challenge for the Phase 2b
     // device-pinned-key path. Unauthenticated by design — the
@@ -450,6 +488,80 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
       });
     });
 
+    // Renew a device token. Deliberately NOT behind deviceAuth: the point
+    // of this route is that a token expired while the device was offline
+    // can still be exchanged within the renewal grace window. The
+    // signature is still fully verified — only the expiry check is
+    // relaxed — and issueDeviceToken refuses devices that are no longer
+    // enrolled or pending, which makes unenroll/block the revocation
+    // point for renewals.
+    enrollment.post('/refresh-token', async (c) => {
+      const bearer = c.req.header('Authorization')?.replace('Bearer ', '');
+      let bodyToken: string | undefined;
+      try {
+        const body = await c.req.json<{ token?: string; refreshToken?: string }>();
+        bodyToken = body.token ?? body.refreshToken;
+      } catch {
+        // Missing or non-JSON body is fine — the header is the primary carrier.
+      }
+      const token = bearer || bodyToken;
+
+      if (!token) {
+        return agentReauth(c, 'Device token required');
+      }
+
+      const graceSeconds = mdm.config.auth?.deviceTokenRenewalGraceSeconds ?? 30 * 24 * 60 * 60;
+      const verified = await mdm.verifyDeviceToken(token, {
+        ignoreExpirationWithinSeconds: graceSeconds,
+      });
+      if (!verified) {
+        return agentReauth(c, 'Invalid or expired device token');
+      }
+
+      try {
+        const renewed = await mdm.issueDeviceToken(verified.deviceId);
+        return agentOkResponse(c, {
+          token: renewed.token,
+          expiresAt: renewed.expiresAt.toISOString(),
+        });
+      } catch {
+        // The device row was deleted or blocked since this token was
+        // issued — the narrow case where terminal action is correct.
+        return agentUnenroll(c, 'Device is no longer eligible for token renewal');
+      }
+    });
+
+    // Poll pending commands without submitting a full heartbeat. Push-woken
+    // agents use this to fetch the command that triggered the wake.
+    enrollment.get('/commands/pending', deviceAuth, async (c) => {
+      const deviceId = c.get('deviceId') as string;
+      const commands = await mdm.commands.getPending(deviceId);
+      return agentOkResponse(c, { commands });
+    });
+
+    // Agent-reported events (app crashes, kiosk exit attempts, security
+    // signals). The type column is free-form in storage; length-bound it
+    // here so a misbehaving agent can't stuff arbitrary blobs into an
+    // indexed column.
+    enrollment.post('/events', deviceAuth, async (c) => {
+      const deviceId = c.get('deviceId') as string;
+      const body = await c.req.json<{ type?: string; payload?: Record<string, unknown> }>();
+
+      if (!body.type || typeof body.type !== 'string' || body.type.length > 100) {
+        throw new HTTPException(400, {
+          message: 'Missing or invalid required field: type (string, max 100 chars)',
+        });
+      }
+
+      const event = await mdm.db.createEvent({
+        deviceId,
+        type: body.type as Parameters<typeof mdm.db.createEvent>[0]['type'],
+        payload: body.payload ?? {},
+      });
+
+      return agentOkResponse(c, { id: event.id, status: 'ok' });
+    });
+
     // Register push token
     enrollment.post('/push-token', deviceAuth, async (c) => {
       const deviceId = c.get('deviceId') as string;
@@ -461,6 +573,22 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
         token: body.token,
       });
 
+      return agentOkResponse(c, { status: 'ok' });
+    });
+
+    // Remove push token(s). Without a provider in the body, all of the
+    // device's push tokens are removed.
+    enrollment.delete('/push-token', deviceAuth, async (c) => {
+      const deviceId = c.get('deviceId') as string;
+      let provider: string | undefined;
+      try {
+        const body = await c.req.json<{ provider?: string }>();
+        provider = body.provider;
+      } catch {
+        // Body is optional.
+      }
+
+      await mdm.db.deletePushToken(deviceId, provider);
       return agentOkResponse(c, { status: 'ok' });
     });
 
