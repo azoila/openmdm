@@ -28,7 +28,7 @@
   },
   "dependencies": {
     "@openmdm/core": "workspace:*",
-    "mqtt": "^5.10.0"
+    "mqtt": "^5.15.2"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
