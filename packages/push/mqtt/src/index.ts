@@ -24,11 +24,13 @@
 
 import type {
   DatabaseAdapter,
+  Logger,
   PushAdapter,
   PushBatchResult,
   PushMessage,
   PushResult,
 } from '@openmdm/core';
+import { createConsoleLogger } from '@openmdm/core';
 import * as mqtt from 'mqtt';
 
 export interface MQTTAdapterOptions {
@@ -113,6 +115,32 @@ export interface MQTTAdapterOptions {
    * Keep-alive interval in seconds (default: 60)
    */
   keepAlive?: number;
+
+  /**
+   * Device-acknowledgment behaviour.
+   *
+   * A publish that reaches the broker is NOT proof the device got it. This
+   * adapter therefore waits for the device to ack on `{topicPrefix}/{deviceId}/ack`.
+   */
+  ack?: {
+    /** Wait for a device ack (default: true). */
+    enabled?: boolean;
+    /** How long to wait before giving up (default: 30000ms). */
+    timeoutMs?: number;
+    /**
+     * Report an un-acked publish as a success (default: **false**).
+     *
+     * Leave this false. It used to be the hard-coded behaviour, and it is a
+     * lie: the caller is told the device received a command it may never have
+     * seen, so the command is marked `sent` and never retried. Only set it
+     * true if your devices genuinely do not publish acks and you accept
+     * fire-and-forget delivery.
+     */
+    treatTimeoutAsSuccess?: boolean;
+  };
+
+  /** Structured logger. Defaults to the console-backed logger from core. */
+  logger?: Logger;
 }
 
 interface DevicePresence {
@@ -122,14 +150,31 @@ interface DevicePresence {
 }
 
 /**
- * Create an MQTT push adapter for OpenMDM
+ * Internals shared between the base adapter and the extended one.
+ *
+ * `mqttExtendedAdapter` used to spread the base adapter and then create its
+ * OWN empty presence map, so `getDeviceStatus` / `getOnlineDevices` /
+ * `isDeviceOnline` always reported "no devices online" no matter what the
+ * broker said, and `disconnect()` only logged. Both now read the same state by
+ * construction.
  */
-export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
+interface MqttInternals {
+  adapter: PushAdapter;
+  devicePresence: Map<string, DevicePresence>;
+  disconnect: () => Promise<void>;
+}
+
+function createMqttAdapter(options: MQTTAdapterOptions): MqttInternals {
   const topicPrefix = options.topicPrefix ?? 'openmdm/devices';
   const qos = options.qos ?? 1;
   const retain = options.retain ?? false;
   const messageExpiryInterval = options.messageExpiryInterval ?? 3600;
   const database = options.database;
+  const log = (options.logger ?? createConsoleLogger()).child({ component: 'push-mqtt' });
+
+  const ackEnabled = options.ack?.enabled ?? true;
+  const ackTimeoutMs = options.ack?.timeoutMs ?? 30_000;
+  const ackTimeoutIsSuccess = options.ack?.treatTimeoutAsSuccess ?? false;
 
   // Generate unique client ID
   const clientId = `${options.clientIdPrefix ?? 'openmdm-server'}-${Math.random().toString(36).substring(2, 10)}`;
@@ -152,6 +197,10 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
     keepalive: options.keepAlive ?? 60,
     reconnectPeriod:
       options.reconnect?.enabled !== false ? (options.reconnect?.initialDelay ?? 1000) : 0,
+    // mqtt.js reconnects on a fixed period rather than an exponential backoff,
+    // so `reconnect.maxDelay` and `reconnect.maxRetries` have no direct
+    // equivalent. They are enforced below in the 'reconnect' handler instead of
+    // being silently ignored, which is what happened before.
     ...(options.tls && {
       ca: options.tls.ca,
       cert: options.tls.cert,
@@ -163,39 +212,61 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
   // Connection state
   let connected = false;
   let connectionError: Error | null = null;
+  let reconnectAttempts = 0;
+
+  const maxReconnectRetries = options.reconnect?.maxRetries;
 
   client.on('connect', () => {
     connected = true;
     connectionError = null;
-    console.log('[OpenMDM MQTT] Connected to broker');
+    reconnectAttempts = 0;
+    log.info('Connected to broker');
 
     // Subscribe to presence topic for all devices
     client.subscribe(`${topicPrefix}/+/presence`, { qos: 1 }, (err) => {
       if (err) {
-        console.error('[OpenMDM MQTT] Failed to subscribe to presence:', err);
+        log.error({ err: err.message }, 'Failed to subscribe to presence topic');
       }
     });
 
     // Subscribe to acknowledgment topic for all devices
     client.subscribe(`${topicPrefix}/+/ack`, { qos: 1 }, (err) => {
       if (err) {
-        console.error('[OpenMDM MQTT] Failed to subscribe to acks:', err);
+        log.error({ err: err.message }, 'Failed to subscribe to ack topic');
       }
     });
   });
 
   client.on('disconnect', () => {
     connected = false;
-    console.log('[OpenMDM MQTT] Disconnected from broker');
+    log.info('Disconnected from broker');
   });
 
   client.on('error', (err) => {
     connectionError = err;
-    console.error('[OpenMDM MQTT] Connection error:', err);
+    log.error({ err: err.message }, 'MQTT connection error');
   });
 
   client.on('reconnect', () => {
-    console.log('[OpenMDM MQTT] Reconnecting...');
+    reconnectAttempts += 1;
+    log.warn(
+      { attempt: reconnectAttempts, maxRetries: maxReconnectRetries },
+      'Reconnecting to broker',
+    );
+
+    // `reconnect.maxRetries` was declared in the options and never wired to
+    // anything, so a broker that stayed down was retried forever with no way to
+    // stop it. Honour the option: give up and surface the failure.
+    if (maxReconnectRetries !== undefined && reconnectAttempts > maxReconnectRetries) {
+      log.error(
+        { attempts: reconnectAttempts, maxRetries: maxReconnectRetries },
+        'Giving up on the broker: reconnect.maxRetries exhausted',
+      );
+      connectionError = new Error(
+        `MQTT broker unreachable after ${maxReconnectRetries} reconnect attempts`,
+      );
+      client.end(true);
+    }
   });
 
   // Handle incoming messages
@@ -214,7 +285,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
           lastSeen: new Date(),
         });
 
-        console.log(`[OpenMDM MQTT] Device ${deviceId} is ${data.online ? 'online' : 'offline'}`);
+        log.debug({ deviceId, online: data.online }, 'Device presence changed');
       } else if (messageType === 'ack') {
         // Message acknowledgment
         const data = JSON.parse(payload.toString());
@@ -232,7 +303,10 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
         }
       }
     } catch (error) {
-      console.error('[OpenMDM MQTT] Error processing message:', error);
+      log.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'Error processing MQTT message',
+      );
     }
   });
 
@@ -289,7 +363,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
   async function publishToDevice(
     deviceId: string,
     message: PushMessage,
-    waitForAck: boolean = true,
+    waitForAck: boolean = ackEnabled,
   ): Promise<PushResult> {
     await waitForConnection();
 
@@ -302,12 +376,31 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
       if (waitForAck) {
         const timeout = setTimeout(() => {
           pendingAcks.delete(messageId);
-          // Message was sent but not acknowledged - still consider it sent
+
+          // A publish accepted by the broker is NOT proof the device saw it.
+          // This used to resolve `success: true` on timeout, which told the
+          // caller a command had been delivered to a device that may have been
+          // offline for a week — core marked the command `sent` and never
+          // retried it. Report the truth and let the retry sweep do its job.
+          if (ackTimeoutIsSuccess) {
+            log.warn(
+              { deviceId, messageId, ackTimeoutMs },
+              'Device did not acknowledge; reporting success because ack.treatTimeoutAsSuccess is set',
+            );
+            resolve({ success: true, messageId });
+            return;
+          }
+
+          log.warn(
+            { deviceId, messageId, ackTimeoutMs },
+            'Device did not acknowledge the published message within the ack timeout',
+          );
           resolve({
-            success: true,
+            success: false,
             messageId,
+            error: `ACK_TIMEOUT: published to broker but ${deviceId} did not acknowledge within ${ackTimeoutMs}ms`,
           });
-        }, 30000); // 30 second timeout for ack
+        }, ackTimeoutMs);
 
         pendingAcks.set(messageId, { resolve, timeout });
       }
@@ -347,20 +440,26 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
     });
   }
 
-  return {
+  const adapter: PushAdapter = {
     async send(deviceId: string, message: PushMessage): Promise<PushResult> {
       try {
         const result = await publishToDevice(deviceId, message);
 
         if (result.success) {
-          console.log(`[OpenMDM MQTT] Sent to ${deviceId}: ${message.type} (${result.messageId})`);
+          log.debug(
+            { deviceId, type: message.type, messageId: result.messageId },
+            'Message delivered',
+          );
         } else {
-          console.error(`[OpenMDM MQTT] Failed to send to ${deviceId}:`, result.error);
+          log.warn({ deviceId, err: result.error }, 'Message delivery failed');
         }
 
         return result;
       } catch (error: any) {
-        console.error(`[OpenMDM MQTT] Error sending to ${deviceId}:`, error);
+        log.error(
+          { deviceId, err: error instanceof Error ? error.message : String(error) },
+          'Error sending message',
+        );
         return {
           success: false,
           error: error.message || 'MQTT send failed',
@@ -390,7 +489,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
         }
       }
 
-      console.log(`[OpenMDM MQTT] Batch sent: ${successCount} success, ${failureCount} failed`);
+      log.info({ successCount, failureCount }, 'Batch send complete');
 
       return { successCount, failureCount, results };
     },
@@ -406,7 +505,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
         });
       }
 
-      console.log(`[OpenMDM MQTT] Registered device ${deviceId}`);
+      log.debug({ deviceId }, 'Registered device');
     },
 
     async unregisterToken(deviceId: string): Promise<void> {
@@ -416,7 +515,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
         await database.deletePushToken(deviceId, 'mqtt');
       }
 
-      console.log(`[OpenMDM MQTT] Unregistered device ${deviceId}`);
+      log.debug({ deviceId }, 'Unregistered device');
     },
 
     async subscribe(deviceId: string, topic: string): Promise<void> {
@@ -439,7 +538,7 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
           if (err) {
             reject(err);
           } else {
-            console.log(`[OpenMDM MQTT] Requested ${deviceId} to subscribe to ${topic}`);
+            log.debug({ deviceId, topic }, 'Requested device to subscribe to topic');
             resolve();
           }
         });
@@ -461,13 +560,50 @@ export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
           if (err) {
             reject(err);
           } else {
-            console.log(`[OpenMDM MQTT] Requested ${deviceId} to unsubscribe from ${topic}`);
+            log.debug({ deviceId, topic }, 'Requested device to unsubscribe from topic');
             resolve();
           }
         });
       });
     },
+
+    disconnect,
   };
+
+  /**
+   * Close the broker connection and settle everything still in flight.
+   *
+   * Without this the MQTT socket, its reconnect timer, and every pending ack
+   * timer leak for the life of the process. Callers awaiting an ack are
+   * resolved as failures rather than left hanging forever.
+   */
+  async function disconnect(): Promise<void> {
+    for (const [messageId, pending] of pendingAcks) {
+      clearTimeout(pending.timeout);
+      pending.resolve({
+        success: false,
+        messageId,
+        error: 'ADAPTER_DISCONNECTED: the MQTT adapter shut down before the device acknowledged',
+      });
+    }
+    pendingAcks.clear();
+
+    await new Promise<void>((resolve) => {
+      client.end(false, {}, () => {
+        log.info('Disconnected from broker');
+        resolve();
+      });
+    });
+  }
+
+  return { adapter, devicePresence, disconnect };
+}
+
+/**
+ * Create an MQTT push adapter for OpenMDM.
+ */
+export function mqttPushAdapter(options: MQTTAdapterOptions): PushAdapter {
+  return createMqttAdapter(options).adapter;
 }
 
 /**
@@ -531,14 +667,18 @@ export interface MQTTExtendedAdapter extends PushAdapter {
  * Create an extended MQTT adapter with device presence tracking
  */
 export function mqttExtendedAdapter(options: MQTTAdapterOptions): MQTTExtendedAdapter {
-  const baseAdapter = mqttPushAdapter(options);
-
-  // Access internal state through closure
-  // This is a simplified version - in production you'd refactor to share state properly
-  const devicePresence = new Map<string, MQTTDeviceStatus>();
+  // Reads the SAME presence map the broker subscription writes to.
+  //
+  // This function used to call mqttPushAdapter(), spread the result, and then
+  // create its own empty `devicePresence` map — one the presence subscription
+  // never touched. So getDeviceStatus() always returned undefined,
+  // getOnlineDevices() always returned [], and isDeviceOnline() always returned
+  // false, no matter how many devices were connected. An operator asking "which
+  // devices are online?" was told "none", forever.
+  const { adapter, devicePresence, disconnect } = createMqttAdapter(options);
 
   return {
-    ...baseAdapter,
+    ...adapter,
 
     getDeviceStatus(deviceId: string): MQTTDeviceStatus | undefined {
       return devicePresence.get(deviceId);
@@ -549,14 +689,9 @@ export function mqttExtendedAdapter(options: MQTTAdapterOptions): MQTTExtendedAd
     },
 
     isDeviceOnline(deviceId: string): boolean {
-      const status = devicePresence.get(deviceId);
-      return status?.online ?? false;
+      return devicePresence.get(deviceId)?.online ?? false;
     },
 
-    async disconnect(): Promise<void> {
-      // Note: This would need access to the client from the base adapter
-      // In production, refactor to properly share the client instance
-      console.log('[OpenMDM MQTT] Disconnecting...');
-    },
+    disconnect,
   };
 }

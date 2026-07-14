@@ -20,11 +20,13 @@
 
 import type {
   DatabaseAdapter,
+  Logger,
   PushAdapter,
   PushBatchResult,
   PushMessage,
   PushResult,
 } from '@openmdm/core';
+import { createConsoleLogger } from '@openmdm/core';
 import * as admin from 'firebase-admin';
 
 export interface FCMAdapterOptions {
@@ -69,12 +71,98 @@ export interface FCMAdapterOptions {
     restrictedPackageName?: string;
     directBootOk?: boolean;
   };
+
+  /**
+   * Retry behaviour for transient FCM failures.
+   *
+   * FCM returns `messaging/server-unavailable`, `messaging/internal-error` and
+   * plain 5xx/429s under load. A single attempt used to be all a message ever
+   * got, so an FCM hiccup meant the command was reported undeliverable and — on
+   * older cores — silently stuck forever.
+   *
+   * Permanent failures (unregistered token, invalid argument) are NOT retried:
+   * they will fail identically every time.
+   */
+  retry?: {
+    /** Attempts per message, including the first (default: 3). */
+    maxAttempts?: number;
+    /** Base delay for exponential backoff (default: 500ms → 500, 1000, 2000…). */
+    initialDelayMs?: number;
+    /** Ceiling for a single backoff wait (default: 10000ms). */
+    maxDelayMs?: number;
+  };
+
+  /** Structured logger. Defaults to the console-backed logger from core. */
+  logger?: Logger;
+}
+
+/**
+ * FCM error codes that are worth another attempt. Anything else — an
+ * unregistered token, a malformed payload — will fail the same way forever.
+ */
+const RETRYABLE_FCM_CODES = new Set([
+  'messaging/server-unavailable',
+  'messaging/internal-error',
+  'messaging/unknown-error',
+  'messaging/quota-exceeded',
+]);
+
+export function isRetryableFcmError(error: { code?: string; message?: string }): boolean {
+  if (error.code && RETRYABLE_FCM_CODES.has(error.code)) {
+    return true;
+  }
+  // firebase-admin surfaces HTTP failures without a code in some paths.
+  const message = error.message ?? '';
+  return (
+    /\b(429|500|502|503|504)\b/.test(message) || /UNAVAILABLE|DEADLINE_EXCEEDED/i.test(message)
+  );
 }
 
 /**
  * Create an FCM push adapter for OpenMDM
  */
 export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
+  const log = (options.logger ?? createConsoleLogger()).child({ component: 'push-fcm' });
+
+  const maxAttempts = options.retry?.maxAttempts ?? 3;
+  const initialDelayMs = options.retry?.initialDelayMs ?? 500;
+  const maxDelayMs = options.retry?.maxDelayMs ?? 10_000;
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /**
+   * Send one message, retrying transient FCM failures with exponential backoff.
+   * Permanent failures throw on the first attempt — retrying an unregistered
+   * token just wastes the backoff window.
+   */
+  const sendWithRetry = async (
+    fcmMessage: admin.messaging.Message,
+    deviceId: string,
+  ): Promise<string> => {
+    let lastError: any;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await messaging.send(fcmMessage);
+      } catch (error: any) {
+        lastError = error;
+
+        if (!isRetryableFcmError(error) || attempt === maxAttempts) {
+          throw error;
+        }
+
+        const delay = Math.min(initialDelayMs * 2 ** (attempt - 1), maxDelayMs);
+        log.warn(
+          { deviceId, attempt, maxAttempts, delayMs: delay, err: error.message, code: error.code },
+          'Transient FCM failure; retrying',
+        );
+        await sleep(delay);
+      }
+    }
+
+    throw lastError;
+  };
+
   // Initialize Firebase Admin if not already initialized
   let app: admin.app.App;
 
@@ -176,7 +264,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
       try {
         const token = await getToken(deviceId);
         if (!token) {
-          console.warn(`[OpenMDM FCM] No token found for device ${deviceId}`);
+          log.warn({ deviceId }, 'No FCM token registered for device');
           return {
             success: false,
             error: 'No FCM token registered for device',
@@ -184,16 +272,16 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
         }
 
         const fcmMessage = buildMessage(token, message);
-        const messageId = await messaging.send(fcmMessage);
+        const messageId = await sendWithRetry(fcmMessage, deviceId);
 
-        console.log(`[OpenMDM FCM] Sent to ${deviceId}: ${message.type} (${messageId})`);
+        log.debug({ deviceId, type: message.type, messageId }, 'Message sent');
 
         return {
           success: true,
           messageId,
         };
       } catch (error: any) {
-        console.error(`[OpenMDM FCM] Error sending to ${deviceId}:`, error);
+        log.error({ deviceId, err: error.message, code: error.code }, 'Failed to send FCM message');
 
         // Handle invalid token
         if (
@@ -297,9 +385,12 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
           });
         }
 
-        console.log(`[OpenMDM FCM] Batch sent: ${successCount} success, ${failureCount} failed`);
+        log.info({ successCount, failureCount }, 'Batch send complete');
       } catch (error: any) {
-        console.error('[OpenMDM FCM] Batch send error:', error);
+        log.error(
+          { err: error instanceof Error ? error.message : String(error) },
+          'Batch send failed',
+        );
 
         // Mark all remaining as failed
         for (const deviceId of deviceIdOrder) {
@@ -332,7 +423,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
         });
       }
 
-      console.log(`[OpenMDM FCM] Registered token for device ${deviceId}`);
+      log.debug({ deviceId }, 'Registered push token');
     },
 
     async unregisterToken(deviceId: string): Promise<void> {
@@ -344,7 +435,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
         await database.deletePushToken(deviceId, 'fcm');
       }
 
-      console.log(`[OpenMDM FCM] Unregistered token for device ${deviceId}`);
+      log.debug({ deviceId }, 'Unregistered push token');
     },
 
     async subscribe(deviceId: string, topic: string): Promise<void> {
@@ -354,7 +445,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
       }
 
       await messaging.subscribeToTopic(token, topic);
-      console.log(`[OpenMDM FCM] Subscribed ${deviceId} to topic ${topic}`);
+      log.debug({ deviceId, topic }, 'Subscribed device to topic');
     },
 
     async unsubscribe(deviceId: string, topic: string): Promise<void> {
@@ -364,7 +455,7 @@ export function fcmPushAdapter(options: FCMAdapterOptions): PushAdapter {
       }
 
       await messaging.unsubscribeFromTopic(token, topic);
-      console.log(`[OpenMDM FCM] Unsubscribed ${deviceId} from topic ${topic}`);
+      log.debug({ deviceId, topic }, 'Unsubscribed device from topic');
     },
   };
 }

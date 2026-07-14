@@ -937,6 +937,39 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     },
 
     /**
+     * Commands the device acknowledged and then never finished.
+     *
+     * `getPendingCommands` only returns `pending`/`sent`, so without this sweep
+     * an agent that acked a command and crashed mid-execution would never be
+     * given it again — the command would sit `acknowledged` forever.
+     */
+    async listStuckAcknowledgedCommands(options: {
+      now: Date;
+      ackTimeoutSeconds: number;
+      limit: number;
+    }): Promise<Command[]> {
+      const { now, ackTimeoutSeconds, limit } = options;
+      const nowIso = now.toISOString();
+
+      const result = await conn()
+        .select()
+        .from(commands)
+        .where(
+          and(
+            eq(commands.status, 'acknowledged'),
+            isNotNull(commands.acknowledgedAt),
+            sql`${commands.acknowledgedAt} + make_interval(secs => ${ackTimeoutSeconds}::float8) <= ${nowIso}::timestamptz`,
+            // An expired command is the reaper's business, not the watchdog's.
+            or(isNull(commands.expiresAt), sql`${commands.expiresAt} > ${nowIso}::timestamptz`),
+          ),
+        )
+        .orderBy(commands.acknowledgedAt)
+        .limit(limit);
+
+      return result.map(toCommand);
+    },
+
+    /**
      * Commands whose push failed and are due another attempt: still `pending`,
      * not expired, attempts remaining, and past their exponential backoff
      * window (`backoffSeconds * 2^(attemptCount - 1)` since the last attempt).

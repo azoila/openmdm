@@ -133,6 +133,16 @@ function createMemoryAdapter() {
       }
       return count;
     },
+    async listStuckAcknowledgedCommands({ now, ackTimeoutSeconds, limit }: any) {
+      return Array.from(commands.values())
+        .filter((c) => {
+          if (c.status !== 'acknowledged') return false;
+          if (!c.acknowledgedAt) return false;
+          if (c.expiresAt && c.expiresAt.getTime() <= now.getTime()) return false;
+          return c.acknowledgedAt.getTime() + ackTimeoutSeconds * 1000 <= now.getTime();
+        })
+        .slice(0, limit);
+    },
     async listRetryableCommands({ now, backoffSeconds, limit }: any) {
       return Array.from(commands.values())
         .filter((c) => {
@@ -477,5 +487,120 @@ describe('delivery retry and dead-lettering', () => {
 
     expect(command.status).toBe('pending');
     expect(command.attemptCount).toBe(1);
+  });
+});
+
+describe('acknowledged-command watchdog', () => {
+  let stack: ReturnType<typeof buildMDM>;
+  let deviceId: string;
+
+  beforeEach(async () => {
+    // ackTimeoutSeconds: 0 in the config means "disabled", so use a tiny window
+    // and backdate acknowledgedAt to simulate elapsed time.
+    stack = buildMDM({ ackTimeoutSeconds: 60, retryBackoffSeconds: 0, defaultMaxAttempts: 3 });
+    deviceId = (await stack.db.createDevice({ model: 'Pixel' })).id;
+  });
+
+  /** Acknowledge a command and pretend it happened `secondsAgo` ago. */
+  async function ackAndAge(commandId: string, secondsAgo: number) {
+    await stack.mdm.commands.acknowledge(commandId);
+    stack.db._commands.get(commandId).acknowledgedAt = new Date(Date.now() - secondsAgo * 1000);
+  }
+
+  it('requeues a command the device acked and never finished', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'installApp' });
+    await ackAndAge(command.id, 120); // acked 2 minutes ago, timeout is 60s
+
+    // Before the sweep, the command is invisible to the device: getPending only
+    // returns pending/sent, so an acked-then-crashed agent never sees it again.
+    expect(await stack.mdm.commands.getPending(deviceId)).toHaveLength(0);
+
+    const result = await stack.mdm.commands.sweepStuck();
+
+    expect(result.requeued).toBe(1);
+    expect(stack.db._commands.get(command.id).status).toBe('pending');
+    expect(await stack.mdm.commands.getPending(deviceId)).toHaveLength(1);
+  });
+
+  it('leaves a freshly-acked command alone', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    await ackAndAge(command.id, 5); // well inside the 60s window
+
+    const result = await stack.mdm.commands.sweepStuck();
+
+    expect(result.requeued).toBe(0);
+    expect(stack.db._commands.get(command.id).status).toBe('acknowledged');
+  });
+
+  it('leaves completed commands alone', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    await stack.mdm.commands.acknowledge(command.id);
+    await stack.mdm.commands.complete(command.id, { success: true });
+    stack.db._commands.get(command.id).acknowledgedAt = new Date(Date.now() - 3600_000);
+
+    const result = await stack.mdm.commands.sweepStuck();
+
+    expect(result.requeued).toBe(0);
+    expect(stack.db._commands.get(command.id).status).toBe('completed');
+  });
+
+  it('a requeued command is re-delivered by the next retry sweep', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'installApp' });
+    await ackAndAge(command.id, 120);
+
+    await stack.mdm.commands.sweepStuck();
+    const retry = await stack.mdm.commands.retryPending();
+
+    expect(retry.delivered).toBe(1);
+    expect(stack.db._commands.get(command.id).status).toBe('sent');
+  });
+
+  it('emits command.requeued', async () => {
+    const handler = vi.fn();
+    stack.mdm.on('command.requeued', handler);
+
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    await ackAndAge(command.id, 120);
+    await stack.mdm.commands.sweepStuck();
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].payload.reason).toBe('ACK_TIMEOUT');
+  });
+
+  it('dead-letters a device that keeps acking and dying', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    // Burn the attempts.
+    stack.db._commands.get(command.id).attemptCount = 3;
+    await ackAndAge(command.id, 120);
+
+    const result = await stack.mdm.commands.sweepStuck();
+
+    expect(result.deadLettered).toBe(1);
+    const row = stack.db._commands.get(command.id);
+    expect(row.status).toBe('failed');
+    expect(row.error).toBe('ACK_TIMEOUT_EXHAUSTED');
+  });
+
+  it('does not requeue an expired command — that is the reaper’s job', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'factoryReset' });
+    await ackAndAge(command.id, 120);
+    stack.db._commands.get(command.id).expiresAt = new Date(Date.now() - 1000);
+
+    const result = await stack.mdm.commands.sweepStuck();
+
+    expect(result.requeued).toBe(0);
+  });
+
+  it('is disabled when ackTimeoutSeconds is 0', async () => {
+    const disabled = buildMDM({ ackTimeoutSeconds: 0 });
+    const device = await disabled.db.createDevice({ model: 'Pixel' });
+    const command = await disabled.mdm.devices.sendCommand(device.id, { type: 'sync' });
+    await disabled.mdm.commands.acknowledge(command.id);
+    disabled.db._commands.get(command.id).acknowledgedAt = new Date(Date.now() - 86_400_000);
+
+    const result = await disabled.mdm.commands.sweepStuck();
+
+    expect(result).toEqual({ requeued: 0, deadLettered: 0 });
+    expect(disabled.db._commands.get(command.id).status).toBe('acknowledged');
   });
 });
