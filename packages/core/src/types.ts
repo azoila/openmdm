@@ -13,6 +13,12 @@ export type DeviceStatus = 'pending' | 'enrolled' | 'unenrolled' | 'blocked';
 
 export interface Device {
   id: string;
+  /**
+   * Owning tenant. Set automatically on resources created through a
+   * tenant-scoped instance (`mdm.withContext({ tenantId })`). `null` on
+   * single-tenant deployments.
+   */
+  tenantId?: string | null;
   externalId?: string | null;
   enrollmentId: string;
   status: DeviceStatus;
@@ -80,6 +86,8 @@ export interface InstalledApp {
 }
 
 export interface CreateDeviceInput {
+  /** Owning tenant. Injected automatically by a tenant-scoped instance. */
+  tenantId?: string;
   enrollmentId: string;
   externalId?: string;
   model?: string;
@@ -118,6 +126,13 @@ export interface UpdateDeviceInput {
 }
 
 export interface DeviceFilter {
+  /**
+   * Restrict results to one tenant. Set automatically by
+   * `mdm.withContext({ tenantId })` — passing it by hand on the root
+   * instance works too, but the scoped instance is the safer path because it
+   * cannot be forgotten.
+   */
+  tenantId?: string;
   status?: DeviceStatus | DeviceStatus[];
   policyId?: string;
   groupId?: string;
@@ -140,6 +155,8 @@ export interface DeviceListResult {
 
 export interface Policy {
   id: string;
+  /** Owning tenant — see {@link Device.tenantId}. */
+  tenantId?: string | null;
   name: string;
   description?: string | null;
   isDefault: boolean;
@@ -242,6 +259,8 @@ export interface PolicyApplication {
 }
 
 export interface CreatePolicyInput {
+  /** Owning tenant. Injected automatically by a tenant-scoped instance. */
+  tenantId?: string;
   name: string;
   description?: string;
   isDefault?: boolean;
@@ -261,6 +280,8 @@ export interface UpdatePolicyInput {
 
 export interface Application {
   id: string;
+  /** Owning tenant — see {@link Device.tenantId}. */
+  tenantId?: string | null;
   name: string;
   packageName: string;
   version: string;
@@ -286,6 +307,8 @@ export interface Application {
 }
 
 export interface CreateApplicationInput {
+  /** Owning tenant. Injected automatically by a tenant-scoped instance. */
+  tenantId?: string;
   name: string;
   packageName: string;
   version: string;
@@ -416,6 +439,8 @@ export type CommandStatus =
 
 export interface Command {
   id: string;
+  /** Owning tenant — see {@link Device.tenantId}. */
+  tenantId?: string | null;
   deviceId: string;
   type: CommandType;
   payload?: Record<string, unknown> | null;
@@ -461,6 +486,8 @@ export interface CommandResult {
 }
 
 export interface SendCommandInput {
+  /** Owning tenant. Injected automatically by a tenant-scoped instance. */
+  tenantId?: string;
   deviceId: string;
   type: CommandType;
   payload?: Record<string, unknown>;
@@ -495,6 +522,8 @@ export interface CommandRetryResult {
 }
 
 export interface CommandFilter {
+  /** Restrict results to one tenant. See {@link DeviceFilter.tenantId}. */
+  tenantId?: string;
   deviceId?: string;
   status?: CommandStatus | CommandStatus[];
   type?: CommandType | CommandType[];
@@ -555,6 +584,8 @@ export interface EventFilter {
 
 export interface Group {
   id: string;
+  /** Owning tenant — see {@link Device.tenantId}. */
+  tenantId?: string | null;
   name: string;
   description?: string | null;
   policyId?: string | null;
@@ -565,6 +596,8 @@ export interface Group {
 }
 
 export interface CreateGroupInput {
+  /** Owning tenant. Injected automatically by a tenant-scoped instance. */
+  tenantId?: string;
   name: string;
   description?: string;
   policyId?: string;
@@ -980,6 +1013,49 @@ export interface WebhookEndpoint {
   enabled: boolean;
 }
 
+/**
+ * Who is acting, and on whose data.
+ *
+ * Passed to `mdm.withContext(...)` to get an instance that enforces tenant
+ * isolation, RBAC, and audit logging on every call. The root instance remains
+ * unscoped — it is the "system" caller (enrollment, background jobs, sweeps),
+ * and it deliberately bypasses these checks because there is no user to
+ * authorize and no tenant to infer.
+ */
+export interface MDMContext {
+  /**
+   * Restricts every read and write to this tenant. Reads from other tenants
+   * return empty/null as if the data did not exist, rather than raising —
+   * a cross-tenant lookup must not confirm that an id exists elsewhere.
+   */
+  tenantId?: string;
+
+  /**
+   * The acting user. When set and `authorization.enabled` is on, every
+   * operation is permission-checked before it runs. Also recorded as the
+   * actor on audit entries.
+   */
+  userId?: string;
+
+  /** Recorded on audit entries. */
+  ipAddress?: string;
+  /** Recorded on audit entries. */
+  userAgent?: string;
+}
+
+/**
+ * A tenant- and actor-scoped view of an MDM instance. Same manager APIs as the
+ * root instance, but every call is isolated, authorized, and audited.
+ */
+export interface ScopedMDM {
+  readonly context: MDMContext;
+  devices: DeviceManager;
+  policies: PolicyManager;
+  apps: ApplicationManager;
+  commands: CommandManager;
+  groups: GroupManager;
+}
+
 export interface AuthConfig {
   /** Get current user from request context */
   getUser: <T = unknown>(context: unknown) => Promise<T | null>;
@@ -1135,6 +1211,15 @@ export interface DatabaseAdapter {
    * core falls back to find-then-create, which closes the duplicate window
    * only approximately — two concurrent sends can still both insert.
    */
+  /**
+   * Declares that this adapter honours `tenantId` on filters and persists it
+   * on create. Core refuses to serve a tenant-scoped instance against an
+   * adapter that does not set this — silently ignoring the filter and
+   * returning every tenant's data is the one failure mode multi-tenancy
+   * cannot have.
+   */
+  supportsTenantScoping?: boolean;
+
   createCommandIdempotent?(data: SendCommandInput): Promise<{ command: Command; created: boolean }>;
 
   /** Look up a command by its per-device idempotency key. */
@@ -1461,6 +1546,24 @@ export interface MDMInstance {
   enroll(request: EnrollmentRequest): Promise<EnrollmentResponse>;
   /** Process device heartbeat */
   processHeartbeat(deviceId: string, heartbeat: Heartbeat): Promise<void>;
+  /**
+   * Return a tenant- and actor-scoped view of this instance.
+   *
+   * Every call made through it is tenant-isolated, permission-checked (when
+   * `authorization.enabled` and a `userId` is supplied), and audit-logged
+   * (when `audit.enabled`). Prefer this over the root instance for anything
+   * driven by a user request — the root instance is the unscoped system
+   * caller and performs none of those checks.
+   *
+   * @example
+   * ```typescript
+   * const scoped = mdm.withContext({ tenantId: 'acme', userId: user.id });
+   * await scoped.devices.list();          // only Acme's devices
+   * await scoped.devices.delete(id);      // 'delete:devices' enforced + audited
+   * ```
+   */
+  withContext(context: MDMContext): ScopedMDM;
+
   /** Verify device token */
   verifyDeviceToken(
     token: string,
@@ -2293,5 +2396,16 @@ export class AuthorizationError extends MDMError {
 export class ValidationError extends MDMError {
   constructor(message: string, details?: unknown) {
     super(message, 'VALIDATION_ERROR', 400, details);
+  }
+}
+
+/**
+ * The instance is configured in a way that cannot serve the request safely —
+ * e.g. a tenant-scoped instance on an adapter that cannot scope by tenant.
+ * Thrown at construction time, not per request.
+ */
+export class ConfigurationError extends MDMError {
+  constructor(message: string, details?: unknown) {
+    super(message, 'CONFIGURATION_ERROR', 500, details);
   }
 }

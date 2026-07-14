@@ -164,6 +164,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
   // Helper to transform DB row to Device
   const toDevice = (row: Record<string, unknown>): Device => ({
     id: row.id as string,
+    tenantId: (row.tenantId as string | null) ?? null,
     externalId: row.externalId as string | null,
     enrollmentId: row.enrollmentId as string,
     status: row.status as Device['status'],
@@ -201,6 +202,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
   // Helper to transform DB row to Policy
   const toPolicy = (row: Record<string, unknown>): Policy => ({
     id: row.id as string,
+    tenantId: (row.tenantId as string | null) ?? null,
     name: row.name as string,
     description: row.description as string | null,
     isDefault: row.isDefault as boolean,
@@ -212,6 +214,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
   // Helper to transform DB row to Application
   const toApplication = (row: Record<string, unknown>): Application => ({
     id: row.id as string,
+    tenantId: (row.tenantId as string | null) ?? null,
     name: row.name as string,
     packageName: row.packageName as string,
     version: row.version as string,
@@ -233,6 +236,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
   // Helper to transform DB row to Command
   const toCommand = (row: Record<string, unknown>): Command => ({
     id: row.id as string,
+    tenantId: (row.tenantId as string | null) ?? null,
     deviceId: row.deviceId as string,
     type: row.type as Command['type'],
     payload: row.payload as Record<string, unknown> | null,
@@ -261,6 +265,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
   // Helper to transform DB row to Group
   const toGroup = (row: Record<string, unknown>): Group => ({
     id: row.id as string,
+    tenantId: (row.tenantId as string | null) ?? null,
     name: row.name as string,
     description: row.description as string | null,
     policyId: row.policyId as string | null,
@@ -314,6 +319,10 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
   });
 
   return {
+    // This adapter persists tenant_id on create and honours tenantId on
+    // filters, so core will serve tenant-scoped instances against it.
+    supportsTenantScoping: true,
+
     // ============================================
     // Device Methods
     // ============================================
@@ -340,6 +349,10 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
       // Build WHERE conditions
       const conditions: (SQL | undefined)[] = [];
+
+      if (filter?.tenantId) {
+        conditions.push(eq(devices.tenantId, filter.tenantId));
+      }
 
       if (filter?.status) {
         if (Array.isArray(filter.status)) {
@@ -393,6 +406,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
       const deviceData = {
         id,
+        tenantId: data.tenantId ?? null,
         enrollmentId: data.enrollmentId,
         externalId: data.externalId ?? null,
         status: 'pending' as const,
@@ -487,6 +501,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
       const policyData = {
         id,
+        tenantId: data.tenantId ?? null,
         name: data.name,
         description: data.description ?? null,
         isDefault: data.isDefault ?? false,
@@ -566,6 +581,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
       const appData = {
         id,
+        tenantId: data.tenantId ?? null,
         name: data.name,
         packageName: data.packageName,
         version: data.version,
@@ -630,6 +646,10 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
       const conditions: (SQL | undefined)[] = [];
 
+      if (filter?.tenantId) {
+        conditions.push(eq(commands.tenantId, filter.tenantId));
+      }
+
       if (filter?.deviceId) {
         conditions.push(eq(commands.deviceId, filter.deviceId));
       }
@@ -668,6 +688,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
       const commandData = {
         id,
+        tenantId: data.tenantId ?? null,
         deviceId: data.deviceId,
         type: data.type,
         payload: data.payload ?? null,
@@ -705,6 +726,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         .insert(commands)
         .values({
           id,
+          tenantId: data.tenantId ?? null,
           deviceId: data.deviceId,
           type: data.type,
           payload: data.payload ?? null,
@@ -926,6 +948,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
       const groupData = {
         id,
+        tenantId: data.tenantId ?? null,
         name: data.name,
         description: data.description ?? null,
         policyId: data.policyId ?? null,
