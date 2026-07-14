@@ -44,6 +44,7 @@ import type {
   MDMEvent,
   Policy,
   PolicySettings,
+  PolicyVersion,
   PushToken,
   RegisterPushTokenInput,
   SendCommandInput,
@@ -80,6 +81,7 @@ import type {
   mdmGroups,
   mdmPluginStorage,
   mdmPolicies,
+  mdmPolicyVersions,
   mdmPushTokens,
   mdmRollbacks,
 } from './postgres';
@@ -117,6 +119,12 @@ export interface DrizzleAdapterOptions {
     appVersions?: typeof mdmAppVersions;
     rollbacks?: typeof mdmRollbacks;
     pluginStorage?: typeof mdmPluginStorage;
+    /**
+     * Policy history table. Required for `policies.history()` and
+     * `policies.rollback()`. Omit and versioning/drift still work — only
+     * history and rollback are unavailable.
+     */
+    policyVersions?: typeof mdmPolicyVersions;
     /**
      * Phase 2b enrollment challenges table. Required for
      * device-pinned-key enrollment. Omit to run enrollment in
@@ -156,6 +164,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     rollbacks,
     pluginStorage,
     enrollmentChallenges,
+    policyVersions,
   } = tables;
 
   // Helper to generate IDs
@@ -176,6 +185,8 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     macAddress: row.macAddress as string | null,
     androidId: row.androidId as string | null,
     policyId: row.policyId as string | null,
+    appliedPolicyVersion: (row.appliedPolicyVersion as number | null) ?? null,
+    policyAppliedAt: (row.policyAppliedAt as Date | null) ?? null,
     agentVersion: row.agentVersion as string | null,
     lastHeartbeat: row.lastHeartbeat as Date | null,
     lastSync: row.lastSync as Date | null,
@@ -207,6 +218,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     description: row.description as string | null,
     isDefault: row.isDefault as boolean,
     settings: row.settings as PolicySettings,
+    version: (row.version as number | null) ?? 1,
     createdAt: row.createdAt as Date,
     updatedAt: row.updatedAt as Date,
   });
@@ -251,6 +263,17 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     expiresAt: (row.expiresAt as Date | null) ?? null,
     attemptCount: (row.attemptCount as number | null) ?? 0,
     maxAttempts: (row.maxAttempts as number | null) ?? 5,
+  });
+
+  // Helper to transform DB row to PolicyVersion
+  const toPolicyVersion = (row: Record<string, unknown>): PolicyVersion => ({
+    id: row.id as string,
+    policyId: row.policyId as string,
+    version: row.version as number,
+    settings: row.settings as PolicySettings,
+    createdBy: (row.createdBy as string | null) ?? null,
+    note: (row.note as string | null) ?? null,
+    createdAt: row.createdAt as Date,
   });
 
   // Helper to transform DB row to Event
@@ -437,6 +460,9 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       if (data.externalId !== undefined) updateData.externalId = data.externalId;
       if (data.status !== undefined) updateData.status = data.status;
       if (data.policyId !== undefined) updateData.policyId = data.policyId;
+      if (data.appliedPolicyVersion !== undefined)
+        updateData.appliedPolicyVersion = data.appliedPolicyVersion;
+      if (data.policyAppliedAt !== undefined) updateData.policyAppliedAt = data.policyAppliedAt;
       if (data.agentVersion !== undefined) updateData.agentVersion = data.agentVersion;
       if (data.model !== undefined) updateData.model = data.model;
       if (data.manufacturer !== undefined) updateData.manufacturer = data.manufacturer;
@@ -502,6 +528,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       const policyData = {
         id,
         tenantId: data.tenantId ?? null,
+        version: data.version ?? 1,
         name: data.name,
         description: data.description ?? null,
         isDefault: data.isDefault ?? false,
@@ -524,6 +551,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       if (data.description !== undefined) updateData.description = data.description;
       if (data.isDefault !== undefined) updateData.isDefault = data.isDefault;
       if (data.settings !== undefined) updateData.settings = data.settings;
+      if (data.version !== undefined) updateData.version = data.version;
 
       await conn().update(policies).set(updateData).where(eq(policies.id, id));
 
@@ -703,6 +731,78 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       await conn().insert(commands).values(commandData);
 
       return this.findCommand(id) as Promise<Command>;
+    },
+
+    // ============================================
+    // Policy Version Methods
+    // ============================================
+
+    async createPolicyVersion(data: any): Promise<any> {
+      if (!policyVersions) {
+        throw new Error(
+          'drizzleAdapter was not given a policyVersions table — policy history is unavailable.',
+        );
+      }
+
+      const id = generateId();
+      await conn()
+        .insert(policyVersions)
+        .values({
+          id,
+          policyId: data.policyId,
+          version: data.version,
+          settings: data.settings,
+          createdBy: data.createdBy ?? null,
+          note: data.note ?? null,
+          createdAt: new Date(),
+        })
+        // A snapshot is written once per (policy, version) and never rewritten.
+        // If a retry re-runs the write, keep the original row.
+        .onConflictDoNothing({
+          target: [policyVersions.policyId, policyVersions.version],
+        });
+
+      const found = await conn()
+        .select()
+        .from(policyVersions)
+        .where(
+          and(eq(policyVersions.policyId, data.policyId), eq(policyVersions.version, data.version)),
+        )
+        .limit(1);
+
+      return toPolicyVersion(found[0]);
+    },
+
+    async listPolicyVersions(policyId: string): Promise<any[]> {
+      if (!policyVersions) {
+        throw new Error(
+          'drizzleAdapter was not given a policyVersions table — policy history is unavailable.',
+        );
+      }
+
+      const result = await conn()
+        .select()
+        .from(policyVersions)
+        .where(eq(policyVersions.policyId, policyId))
+        .orderBy(desc(policyVersions.version));
+
+      return result.map(toPolicyVersion);
+    },
+
+    async findPolicyVersion(policyId: string, version: number): Promise<any> {
+      if (!policyVersions) {
+        throw new Error(
+          'drizzleAdapter was not given a policyVersions table — policy history is unavailable.',
+        );
+      }
+
+      const result = await conn()
+        .select()
+        .from(policyVersions)
+        .where(and(eq(policyVersions.policyId, policyId), eq(policyVersions.version, version)))
+        .limit(1);
+
+      return result[0] ? toPolicyVersion(result[0]) : null;
     },
 
     /**

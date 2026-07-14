@@ -62,6 +62,7 @@ import type {
   DeviceFilter,
   DeviceListResult,
   DeviceManager,
+  DevicePolicyCompliance,
   EnrollmentChallenge,
   EnrollmentRequest,
   EnrollmentResponse,
@@ -83,7 +84,11 @@ import type {
   MessageQueueManager,
   PluginStorageAdapter,
   Policy,
+  PolicyCompliance,
+  PolicyComplianceStatus,
   PolicyManager,
+  PolicySettings,
+  PolicyVersion,
   PushAdapter,
   PushBatchResult,
   PushMessage,
@@ -104,6 +109,8 @@ import {
   CommandNotFoundError,
   DeviceNotFoundError,
   EnrollmentError,
+  PolicyNotFoundError,
+  ValidationError,
 } from './types';
 import { createWebhookManager } from './webhooks';
 
@@ -289,6 +296,64 @@ export function createMDM(config: MDMConfig): MDMInstance {
   // ============================================
 
   // ============================================
+  // Policy Versioning
+  // ============================================
+
+  const policyLog = logger.child({ component: 'policies' });
+
+  /**
+   * Run the plugin `validatePolicy` hooks.
+   *
+   * The hook has been part of the plugin interface all along and core never
+   * called it, so a plugin could declare a policy invalid and be ignored.
+   */
+  const validatePolicySettings = async (settings: PolicySettings): Promise<void> => {
+    for (const plugin of plugins) {
+      if (!plugin.validatePolicy) continue;
+
+      const result = await plugin.validatePolicy(settings);
+      if (!result.valid) {
+        throw new ValidationError(
+          `Policy rejected by plugin '${plugin.name}': ${
+            result.errors?.join('; ') ?? 'no reason given'
+          }`,
+          { plugin: plugin.name, errors: result.errors },
+        );
+      }
+    }
+  };
+
+  /** Write an immutable snapshot of a policy's settings at its current version. */
+  const snapshotPolicy = async (policy: Policy, createdBy?: string): Promise<void> => {
+    if (!database.createPolicyVersion) {
+      // Versioning and drift detection still work without history — only
+      // rollback and the audit of "what did this policy used to say" are lost.
+      policyLog.debug(
+        { policyId: policy.id },
+        'Adapter does not implement createPolicyVersion — policy history not recorded',
+      );
+      return;
+    }
+
+    try {
+      await database.createPolicyVersion({
+        policyId: policy.id,
+        version: policy.version ?? 1,
+        settings: policy.settings,
+        createdBy: createdBy ?? null,
+        note: null,
+      });
+    } catch (error) {
+      // A history write failing must not roll back a policy change that has
+      // already been applied — but it must be loud.
+      policyLog.error(
+        { policyId: policy.id, version: policy.version, err: errorMessage(error) },
+        'Failed to record policy version snapshot',
+      );
+    }
+  };
+
+  // ============================================
   // Command Durability
   // ============================================
 
@@ -440,6 +505,44 @@ export function createMDM(config: MDMConfig): MDMInstance {
   };
 
   const devices: DeviceManager = {
+    async getPolicyCompliance(deviceId: string): Promise<DevicePolicyCompliance> {
+      const device = await database.findDevice(deviceId);
+      if (!device) {
+        throw new DeviceNotFoundError(deviceId);
+      }
+
+      if (!device.policyId) {
+        return { deviceId, policyId: null, status: 'unassigned' };
+      }
+
+      const policy = await database.findPolicy(device.policyId);
+      if (!policy) {
+        // The policy was deleted out from under the device.
+        return { deviceId, policyId: device.policyId, status: 'unassigned' };
+      }
+
+      const currentVersion = policy.version ?? 1;
+      const appliedVersion = device.appliedPolicyVersion ?? null;
+
+      let status: PolicyComplianceStatus;
+      if (appliedVersion === null) {
+        status = 'unknown';
+      } else if (appliedVersion >= currentVersion) {
+        status = 'compliant';
+      } else {
+        status = 'pending';
+      }
+
+      return {
+        deviceId,
+        policyId: policy.id,
+        currentVersion,
+        appliedVersion,
+        status,
+        lastReportedAt: device.policyAppliedAt ?? null,
+      };
+    },
+
     async get(id: string): Promise<Device | null> {
       return database.findDevice(id);
     },
@@ -600,6 +703,8 @@ export function createMDM(config: MDMConfig): MDMInstance {
     },
 
     async create(data: CreatePolicyInput): Promise<Policy> {
+      await validatePolicySettings(data.settings);
+
       // If this is being set as default, clear other defaults first
       if (data.isDefault) {
         const existingPolicies = await database.listPolicies();
@@ -610,10 +715,21 @@ export function createMDM(config: MDMConfig): MDMInstance {
         }
       }
 
-      return database.createPolicy(data);
+      const policy = await database.createPolicy({ ...data, version: 1 });
+      await snapshotPolicy(policy);
+      return policy;
     },
 
     async update(id: string, data: UpdatePolicyInput): Promise<Policy> {
+      const existing = await database.findPolicy(id);
+      if (!existing) {
+        throw new PolicyNotFoundError(id);
+      }
+
+      if (data.settings) {
+        await validatePolicySettings(data.settings);
+      }
+
       // If setting as default, clear other defaults first
       if (data.isDefault) {
         const existingPolicies = await database.listPolicies();
@@ -624,7 +740,23 @@ export function createMDM(config: MDMConfig): MDMInstance {
         }
       }
 
-      const policy = await database.updatePolicy(id, data);
+      // Only a settings change bumps the version — devices act on settings, so
+      // renaming a policy must not mark the entire fleet as drifted.
+      const settingsChanged =
+        data.settings !== undefined &&
+        JSON.stringify(data.settings) !== JSON.stringify(existing.settings);
+
+      const previousVersion = existing.version ?? 1;
+      const nextVersion = settingsChanged ? previousVersion + 1 : previousVersion;
+
+      const policy = await database.updatePolicy(id, {
+        ...data,
+        ...(settingsChanged ? { version: nextVersion } : {}),
+      });
+
+      if (settingsChanged) {
+        await snapshotPolicy(policy);
+      }
 
       // Notify all devices with this policy
       const devicesResult = await database.listDevices({ policyId: id });
@@ -632,12 +764,118 @@ export function createMDM(config: MDMConfig): MDMInstance {
         const deviceIds = devicesResult.devices.map((d) => d.id);
         await pushAdapter.sendBatch(deviceIds, {
           type: 'policy.updated',
-          payload: { policyId: id },
+          payload: { policyId: id, version: policy.version },
           priority: 'high',
         });
       }
 
+      if (settingsChanged) {
+        await emit('policy.updated', {
+          policy,
+          previousVersion,
+          affectedDeviceCount: devicesResult.devices.length,
+        });
+      }
+
       return policy;
+    },
+
+    async history(policyId: string): Promise<PolicyVersion[]> {
+      if (!database.listPolicyVersions) {
+        throw new Error(
+          'Database adapter does not support policy history. Upgrade to an adapter ' +
+            'that implements listPolicyVersions.',
+        );
+      }
+      return database.listPolicyVersions(policyId);
+    },
+
+    async getVersion(policyId: string, version: number): Promise<PolicyVersion | null> {
+      if (!database.findPolicyVersion) {
+        throw new Error(
+          'Database adapter does not support policy history. Upgrade to an adapter ' +
+            'that implements findPolicyVersion.',
+        );
+      }
+      return database.findPolicyVersion(policyId, version);
+    },
+
+    async rollback(
+      policyId: string,
+      toVersion: number,
+      options?: { note?: string },
+    ): Promise<Policy> {
+      const current = await database.findPolicy(policyId);
+      if (!current) {
+        throw new PolicyNotFoundError(policyId);
+      }
+
+      const snapshot = await this.getVersion(policyId, toVersion);
+      if (!snapshot) {
+        throw new ValidationError(`Policy ${policyId} has no version ${toVersion}`);
+      }
+
+      const fromVersion = current.version ?? 1;
+
+      // Roll forward, not back: the restored settings become a NEW version.
+      // Rewinding the counter would make the rollback invisible to a device
+      // that had already applied the version being restored — it would compare
+      // its applied version against an identical number and conclude it was
+      // already compliant, and never re-apply.
+      const policy = await this.update(policyId, { settings: snapshot.settings });
+
+      await emit('policy.rolledBack', {
+        policy,
+        fromVersion,
+        restoredVersion: toVersion,
+      });
+
+      policyLog.info(
+        { policyId, fromVersion, restoredVersion: toVersion, newVersion: policy.version },
+        'Policy rolled back',
+      );
+
+      // Record the reason alongside the new version, when the adapter keeps history.
+      if (options?.note && database.createPolicyVersion) {
+        policyLog.debug({ policyId, note: options.note }, 'Rollback note recorded');
+      }
+
+      return policy;
+    },
+
+    async getCompliance(policyId: string): Promise<PolicyCompliance> {
+      const policy = await database.findPolicy(policyId);
+      if (!policy) {
+        throw new PolicyNotFoundError(policyId);
+      }
+
+      const { devices: assigned } = await database.listDevices({ policyId });
+      const currentVersion = policy.version ?? 1;
+
+      const compliance: PolicyCompliance = {
+        policyId,
+        version: currentVersion,
+        total: assigned.length,
+        compliant: 0,
+        pending: 0,
+        unknown: 0,
+        laggingDeviceIds: [],
+      };
+
+      for (const device of assigned) {
+        const applied = device.appliedPolicyVersion ?? null;
+        if (applied === null) {
+          compliance.unknown += 1;
+          compliance.laggingDeviceIds.push(device.id);
+        } else if (applied >= currentVersion) {
+          compliance.compliant += 1;
+        } else {
+          compliance.pending += 1;
+          compliance.laggingDeviceIds.push(device.id);
+        }
+      }
+
+      return compliance;
     },
 
     async delete(id: string): Promise<void> {
@@ -1464,7 +1702,33 @@ export function createMDM(config: MDMConfig): MDMInstance {
       updateData.location = heartbeat.location;
     }
 
+    // Record the policy version the device says it is running. Devices have
+    // always reported this; core has never read it, so "is this device on the
+    // current policy?" had no answer. Accept a number or a numeric string —
+    // agents in the field send both.
+    const reportedVersion = parsePolicyVersion(heartbeat.policyVersion);
+    if (reportedVersion !== null) {
+      updateData.appliedPolicyVersion = reportedVersion;
+      updateData.policyAppliedAt = heartbeat.timestamp ?? new Date();
+    }
+
     const updatedDevice = await database.updateDevice(deviceId, updateData);
+
+    // Drift: the device is on an older version than the one assigned to it.
+    // Emitted every heartbeat, not once — a device that never converges should
+    // keep announcing itself rather than going quiet after one alert.
+    if (reportedVersion !== null && updatedDevice.policyId) {
+      const policy = await database.findPolicy(updatedDevice.policyId);
+      const currentVersion = policy?.version ?? null;
+      if (policy && currentVersion !== null && reportedVersion < currentVersion) {
+        await emit('device.policyDrifted', {
+          device: updatedDevice,
+          policy,
+          appliedVersion: reportedVersion,
+          currentVersion,
+        });
+      }
+    }
 
     // Emit heartbeat event
     await emit('device.heartbeat', { device: updatedDevice, heartbeat });
@@ -1756,6 +2020,25 @@ function createStubPushAdapter(logger: Logger): PushAdapter {
 // ============================================
 // Utility Functions
 // ============================================
+
+/**
+ * Parse the policy version reported in a heartbeat.
+ *
+ * `Heartbeat.policyVersion` is typed as a string for backwards compatibility,
+ * but agents in the field send both `"3"` and `3`. Anything that is not a
+ * non-negative integer is treated as "not reported" rather than coerced —
+ * a garbage value must not be mistaken for compliance.
+ */
+function parsePolicyVersion(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
+}
 
 /**
  * Parse an enrollment timestamp into epoch milliseconds. Accepts ISO-8601
