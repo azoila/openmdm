@@ -406,7 +406,13 @@ export type CommandStatus =
   | 'acknowledged'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  /**
+   * The command passed its `expiresAt` before the device picked it up. A
+   * `factoryReset` queued for a device that stayed offline for three months
+   * must not fire when it finally checks in — it expires instead.
+   */
+  | 'expired';
 
 export interface Command {
   id: string;
@@ -420,6 +426,32 @@ export interface Command {
   sentAt?: Date | null;
   acknowledgedAt?: Date | null;
   completedAt?: Date | null;
+
+  /**
+   * Caller-supplied deduplication key. Two `send` calls with the same key
+   * return the same command instead of queueing the operation twice — the
+   * thing you want when a retrying HTTP client double-posts "wipe this
+   * device". Unique per device when set.
+   */
+  idempotencyKey?: string | null;
+
+  /**
+   * When set, the command must not be delivered after this instant. Reaped
+   * by `commands.expireStale()`, and filtered out of `getPending` so an
+   * expired command is never handed to a device even if the reaper has not
+   * run yet.
+   */
+  expiresAt?: Date | null;
+
+  /** Delivery attempts made so far (incremented per push attempt). */
+  attemptCount: number;
+
+  /**
+   * Delivery attempts allowed before the command is dead-lettered (moved to
+   * `failed` with a `DELIVERY_EXHAUSTED` error). This bounds *delivery*
+   * attempts, not device-side execution retries.
+   */
+  maxAttempts: number;
 }
 
 export interface CommandResult {
@@ -432,6 +464,34 @@ export interface SendCommandInput {
   deviceId: string;
   type: CommandType;
   payload?: Record<string, unknown>;
+
+  /** Deduplication key — see {@link Command.idempotencyKey}. */
+  idempotencyKey?: string;
+
+  /**
+   * Time-to-live in seconds. Sets `expiresAt` to now + ttl. Ignored when
+   * `expiresAt` is passed explicitly. Falls back to
+   * `config.commands.defaultTtlSeconds`.
+   */
+  ttlSeconds?: number;
+
+  /** Absolute expiry. Takes precedence over `ttlSeconds`. */
+  expiresAt?: Date;
+
+  /** Delivery attempts allowed. Falls back to `config.commands.defaultMaxAttempts`. */
+  maxAttempts?: number;
+}
+
+/**
+ * Result of a delivery sweep. Returned by `commands.retryPending()`.
+ */
+export interface CommandRetryResult {
+  /** Commands that were re-pushed successfully on this sweep. */
+  delivered: number;
+  /** Commands whose push failed again but still have attempts left. */
+  retried: number;
+  /** Commands that exhausted `maxAttempts` and were dead-lettered. */
+  deadLettered: number;
 }
 
 export interface CommandFilter {
@@ -783,6 +843,31 @@ export interface MDMConfig {
     adapter: 'database' | 'memory';
   };
 
+  /** Command delivery durability defaults. */
+  commands?: {
+    /**
+     * Default TTL applied to commands that don't pass one. Commands not
+     * delivered within this window are reaped to `expired`.
+     *
+     * Defaults to 604800 (7 days). Set to 0 for no default expiry — but
+     * note that a command with no expiry queued for a long-offline device
+     * will still fire whenever that device returns, months later.
+     */
+    defaultTtlSeconds?: number;
+
+    /**
+     * Delivery attempts allowed before a command is dead-lettered.
+     * Defaults to 5. This bounds delivery, not device-side execution.
+     */
+    defaultMaxAttempts?: number;
+
+    /**
+     * Base delay, in seconds, for exponential backoff between delivery
+     * attempts (attempt N waits `base * 2^(N-1)`). Defaults to 60.
+     */
+    retryBackoffSeconds?: number;
+  };
+
   /**
    * Structured logger. Replaces OpenMDM's internal `console.*` calls
    * so log output lands in the host application's logging pipeline
@@ -1038,6 +1123,38 @@ export interface DatabaseAdapter {
   createCommand(data: SendCommandInput): Promise<Command>;
   updateCommand(id: string, data: Partial<Command>): Promise<Command | null>;
   getPendingCommands(deviceId: string): Promise<Command[]>;
+
+  /**
+   * Insert a command, or return the existing one when a command with the
+   * same `idempotencyKey` already exists for this device. `created` tells
+   * the caller which happened.
+   *
+   * Adapters should implement this as a single atomic statement (Postgres:
+   * `INSERT ... ON CONFLICT DO NOTHING` against a unique index on
+   * `(device_id, idempotency_key)`). When an adapter does not implement it,
+   * core falls back to find-then-create, which closes the duplicate window
+   * only approximately — two concurrent sends can still both insert.
+   */
+  createCommandIdempotent?(data: SendCommandInput): Promise<{ command: Command; created: boolean }>;
+
+  /** Look up a command by its per-device idempotency key. */
+  findCommandByIdempotencyKey?(deviceId: string, idempotencyKey: string): Promise<Command | null>;
+
+  /**
+   * Transition every undelivered command whose `expiresAt` is at or before
+   * `now` to `expired`. Returns the number of rows changed.
+   */
+  expireCommands?(now: Date): Promise<number>;
+
+  /**
+   * Commands still awaiting a successful push: `pending`, not expired, with
+   * `attemptCount < maxAttempts`, whose backoff window has elapsed.
+   */
+  listRetryableCommands?(options: {
+    now: Date;
+    backoffSeconds: number;
+    limit: number;
+  }): Promise<Command[]>;
 
   // Events
   createEvent(event: Omit<MDMEvent, 'id' | 'createdAt'>): Promise<MDMEvent>;
@@ -1419,7 +1536,29 @@ export interface CommandManager {
   acknowledge(id: string): Promise<Command>;
   complete(id: string, result: CommandResult): Promise<Command>;
   fail(id: string, error: string): Promise<Command>;
+  /**
+   * Commands awaiting delivery to this device. Expired commands are never
+   * returned, and are transitioned to `expired` on the way out.
+   */
   getPending(deviceId: string): Promise<Command[]>;
+
+  /**
+   * Re-push commands that are still `pending` because their original push
+   * failed. Commands that exhaust `maxAttempts` are dead-lettered (moved to
+   * `failed` with a `DELIVERY_EXHAUSTED` error) rather than being retried
+   * forever.
+   *
+   * Call this from a scheduled job. Without it, a command whose push failed
+   * sits `pending` until the device happens to poll — which is exactly the
+   * "silently stuck forever" failure mode this exists to prevent.
+   */
+  retryPending(options?: { limit?: number }): Promise<CommandRetryResult>;
+
+  /**
+   * Transition commands past their `expiresAt` to `expired`. Returns the
+   * number reaped. Call from the same scheduled job as `retryPending`.
+   */
+  expireStale(): Promise<number>;
 }
 
 export interface GroupManager {

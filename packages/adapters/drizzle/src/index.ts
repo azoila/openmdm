@@ -20,6 +20,7 @@
  * ```
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   Application,
   AppRollback,
@@ -51,7 +52,20 @@ import type {
   UpdateGroupInput,
   UpdatePolicyInput,
 } from '@openmdm/core';
-import { and, desc, eq, inArray, isNull, like, lt, or, type SQL, sql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  like,
+  lt,
+  lte,
+  or,
+  type SQL,
+  sql,
+} from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 
 // Import postgres schema types
@@ -69,6 +83,13 @@ import type {
   mdmPushTokens,
   mdmRollbacks,
 } from './postgres';
+
+/**
+ * Holds the active transaction handle for the current async context. See
+ * `conn()` in `drizzleAdapter` for why this is per-context rather than a
+ * shared variable.
+ */
+const txStorage = new AsyncLocalStorage<unknown>();
 
 // Type for Drizzle database instance
 type DrizzleDB = {
@@ -110,6 +131,18 @@ export interface DrizzleAdapterOptions {
  */
 export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): DatabaseAdapter {
   const { tables } = options;
+
+  /**
+   * The connection every query runs on.
+   *
+   * Inside `transaction(fn)` this resolves to the transaction handle, so
+   * adapter methods called from `fn` participate in that transaction. Outside
+   * one it is the pool. The handle is carried in AsyncLocalStorage rather than
+   * a module-level variable because a shared mutable "current tx" would leak
+   * across concurrent requests — request A's transaction would silently
+   * capture request B's queries.
+   */
+  const conn = (): any => txStorage.getStore() ?? (db as any);
   const {
     devices,
     policies,
@@ -210,6 +243,10 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     sentAt: row.sentAt as Date | null,
     acknowledgedAt: row.acknowledgedAt as Date | null,
     completedAt: row.completedAt as Date | null,
+    idempotencyKey: (row.idempotencyKey as string | null) ?? null,
+    expiresAt: (row.expiresAt as Date | null) ?? null,
+    attemptCount: (row.attemptCount as number | null) ?? 0,
+    maxAttempts: (row.maxAttempts as number | null) ?? 5,
   });
 
   // Helper to transform DB row to Event
@@ -282,12 +319,12 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     // ============================================
 
     async findDevice(id: string): Promise<Device | null> {
-      const result = await (db as any).select().from(devices).where(eq(devices.id, id)).limit(1);
+      const result = await conn().select().from(devices).where(eq(devices.id, id)).limit(1);
       return result[0] ? toDevice(result[0]) : null;
     },
 
     async findDeviceByEnrollmentId(enrollmentId: string): Promise<Device | null> {
-      const result = await (db as any)
+      const result = await conn()
         .select()
         .from(devices)
         .where(eq(devices.enrollmentId, enrollmentId))
@@ -299,7 +336,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       const limit = filter?.limit ?? 100;
       const offset = filter?.offset ?? 0;
 
-      let query = (db as any).select().from(devices);
+      let query = conn().select().from(devices);
 
       // Build WHERE conditions
       const conditions: (SQL | undefined)[] = [];
@@ -333,7 +370,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       }
 
       // Get total count
-      const countResult = await (db as any)
+      const countResult = await conn()
         .select({ count: sql<number>`count(*)` })
         .from(devices)
         .where(conditions.length > 0 ? and(...conditions) : undefined);
@@ -373,7 +410,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         updatedAt: now,
       };
 
-      await (db as any).insert(devices).values(deviceData);
+      await conn().insert(devices).values(deviceData);
 
       return this.findDevice(id) as Promise<Device>;
     },
@@ -407,13 +444,13 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         updateData.locationTimestamp = data.location.timestamp;
       }
 
-      await (db as any).update(devices).set(updateData).where(eq(devices.id, id));
+      await conn().update(devices).set(updateData).where(eq(devices.id, id));
 
       return this.findDevice(id) as Promise<Device>;
     },
 
     async deleteDevice(id: string): Promise<void> {
-      await (db as any).delete(devices).where(eq(devices.id, id));
+      await conn().delete(devices).where(eq(devices.id, id));
     },
 
     async countDevices(filter?: DeviceFilter): Promise<number> {
@@ -426,12 +463,12 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     // ============================================
 
     async findPolicy(id: string): Promise<Policy | null> {
-      const result = await (db as any).select().from(policies).where(eq(policies.id, id)).limit(1);
+      const result = await conn().select().from(policies).where(eq(policies.id, id)).limit(1);
       return result[0] ? toPolicy(result[0]) : null;
     },
 
     async findDefaultPolicy(): Promise<Policy | null> {
-      const result = await (db as any)
+      const result = await conn()
         .select()
         .from(policies)
         .where(eq(policies.isDefault, true))
@@ -440,7 +477,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     },
 
     async listPolicies(): Promise<Policy[]> {
-      const result = await (db as any).select().from(policies).orderBy(desc(policies.createdAt));
+      const result = await conn().select().from(policies).orderBy(desc(policies.createdAt));
       return result.map(toPolicy);
     },
 
@@ -458,7 +495,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         updatedAt: now,
       };
 
-      await (db as any).insert(policies).values(policyData);
+      await conn().insert(policies).values(policyData);
 
       return this.findPolicy(id) as Promise<Policy>;
     },
@@ -473,13 +510,13 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       if (data.isDefault !== undefined) updateData.isDefault = data.isDefault;
       if (data.settings !== undefined) updateData.settings = data.settings;
 
-      await (db as any).update(policies).set(updateData).where(eq(policies.id, id));
+      await conn().update(policies).set(updateData).where(eq(policies.id, id));
 
       return this.findPolicy(id) as Promise<Policy>;
     },
 
     async deletePolicy(id: string): Promise<void> {
-      await (db as any).delete(policies).where(eq(policies.id, id));
+      await conn().delete(policies).where(eq(policies.id, id));
     },
 
     // ============================================
@@ -487,7 +524,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     // ============================================
 
     async findApplication(id: string): Promise<Application | null> {
-      const result = await (db as any)
+      const result = await conn()
         .select()
         .from(applications)
         .where(eq(applications.id, id))
@@ -499,7 +536,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       packageName: string,
       version?: string,
     ): Promise<Application | null> {
-      let query = (db as any)
+      let query = conn()
         .select()
         .from(applications)
         .where(eq(applications.packageName, packageName));
@@ -513,7 +550,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     },
 
     async listApplications(activeOnly?: boolean): Promise<Application[]> {
-      let query = (db as any).select().from(applications);
+      let query = conn().select().from(applications);
 
       if (activeOnly) {
         query = query.where(eq(applications.isActive, true));
@@ -547,7 +584,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         updatedAt: now,
       };
 
-      await (db as any).insert(applications).values(appData);
+      await conn().insert(applications).values(appData);
 
       return this.findApplication(id) as Promise<Application>;
     },
@@ -570,13 +607,13 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       if (data.isActive !== undefined) updateData.isActive = data.isActive;
       if (data.metadata !== undefined) updateData.metadata = data.metadata;
 
-      await (db as any).update(applications).set(updateData).where(eq(applications.id, id));
+      await conn().update(applications).set(updateData).where(eq(applications.id, id));
 
       return this.findApplication(id) as Promise<Application>;
     },
 
     async deleteApplication(id: string): Promise<void> {
-      await (db as any).delete(applications).where(eq(applications.id, id));
+      await conn().delete(applications).where(eq(applications.id, id));
     },
 
     // ============================================
@@ -584,12 +621,12 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     // ============================================
 
     async findCommand(id: string): Promise<Command | null> {
-      const result = await (db as any).select().from(commands).where(eq(commands.id, id)).limit(1);
+      const result = await conn().select().from(commands).where(eq(commands.id, id)).limit(1);
       return result[0] ? toCommand(result[0]) : null;
     },
 
     async listCommands(filter?: CommandFilter): Promise<Command[]> {
-      let query = (db as any).select().from(commands);
+      let query = conn().select().from(commands);
 
       const conditions: (SQL | undefined)[] = [];
 
@@ -636,11 +673,94 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         payload: data.payload ?? null,
         status: 'pending' as const,
         createdAt: now,
+        idempotencyKey: data.idempotencyKey ?? null,
+        expiresAt: data.expiresAt ?? null,
+        attemptCount: 0,
+        maxAttempts: data.maxAttempts ?? 5,
       };
 
-      await (db as any).insert(commands).values(commandData);
+      await conn().insert(commands).values(commandData);
 
       return this.findCommand(id) as Promise<Command>;
+    },
+
+    /**
+     * Atomic idempotent insert.
+     *
+     * `ON CONFLICT DO NOTHING` against the partial unique index on
+     * `(device_id, idempotency_key)` means two concurrent senders race in the
+     * database rather than in application code: exactly one insert lands, the
+     * other returns zero rows and reads back the winner. A find-then-insert in
+     * application code cannot give this guarantee.
+     */
+    async createCommandIdempotent(
+      data: SendCommandInput,
+    ): Promise<{ command: Command; created: boolean }> {
+      if (!data.idempotencyKey) {
+        return { command: await this.createCommand(data), created: true };
+      }
+
+      const id = generateId();
+      const inserted = await conn()
+        .insert(commands)
+        .values({
+          id,
+          deviceId: data.deviceId,
+          type: data.type,
+          payload: data.payload ?? null,
+          status: 'pending' as const,
+          createdAt: new Date(),
+          idempotencyKey: data.idempotencyKey,
+          expiresAt: data.expiresAt ?? null,
+          attemptCount: 0,
+          maxAttempts: data.maxAttempts ?? 5,
+        })
+        .onConflictDoNothing({
+          target: [commands.deviceId, commands.idempotencyKey],
+          // The unique index is partial, so Postgres only matches it as an
+          // ON CONFLICT target when its predicate is restated. Without this:
+          // "there is no unique or exclusion constraint matching the
+          // ON CONFLICT specification". (For onConflictDoNothing, drizzle
+          // emits this option as the index predicate, not a row filter.)
+          where: sql`${commands.idempotencyKey} IS NOT NULL`,
+        })
+        .returning();
+
+      if (inserted.length > 0) {
+        return { command: toCommand(inserted[0]), created: true };
+      }
+
+      // Lost the race (or a duplicate send): the winning row is authoritative.
+      const conflicting = await conn()
+        .select()
+        .from(commands)
+        .where(
+          and(
+            eq(commands.deviceId, data.deviceId),
+            eq(commands.idempotencyKey, data.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      const existing = conflicting[0] ? toCommand(conflicting[0]) : null;
+      if (!existing) {
+        // The conflicting row vanished between the insert and this read —
+        // only possible if it was deleted concurrently. Treat as a fresh send.
+        return { command: await this.createCommand(data), created: true };
+      }
+      return { command: existing, created: false };
+    },
+
+    async findCommandByIdempotencyKey(
+      deviceId: string,
+      idempotencyKey: string,
+    ): Promise<Command | null> {
+      const result = await conn()
+        .select()
+        .from(commands)
+        .where(and(eq(commands.deviceId, deviceId), eq(commands.idempotencyKey, idempotencyKey)))
+        .limit(1);
+
+      return result[0] ? toCommand(result[0]) : null;
     },
 
     async updateCommand(id: string, data: Partial<Command>): Promise<Command | null> {
@@ -652,8 +772,16 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       if (data.sentAt !== undefined) updateData.sentAt = data.sentAt;
       if (data.acknowledgedAt !== undefined) updateData.acknowledgedAt = data.acknowledgedAt;
       if (data.completedAt !== undefined) updateData.completedAt = data.completedAt;
+      if (data.expiresAt !== undefined) updateData.expiresAt = data.expiresAt;
+      if (data.maxAttempts !== undefined) updateData.maxAttempts = data.maxAttempts;
+      // Recording the attempt also stamps lastAttemptAt — that timestamp is
+      // what the retry sweep measures backoff against.
+      if (data.attemptCount !== undefined) {
+        updateData.attemptCount = data.attemptCount;
+        updateData.lastAttemptAt = new Date();
+      }
 
-      await (db as any).update(commands).set(updateData).where(eq(commands.id, id));
+      await conn().update(commands).set(updateData).where(eq(commands.id, id));
 
       return this.findCommand(id);
     },
@@ -663,6 +791,66 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         deviceId,
         status: ['pending', 'sent'],
       });
+    },
+
+    /**
+     * Reap commands that outlived their TTL before a device collected them.
+     * Only undelivered statuses are touched: a command the device already
+     * completed or failed keeps its terminal status.
+     */
+    async expireCommands(now: Date): Promise<number> {
+      const expired = await conn()
+        .update(commands)
+        .set({ status: 'expired', completedAt: now })
+        .where(
+          and(
+            inArray(commands.status, ['pending', 'sent', 'acknowledged']),
+            isNotNull(commands.expiresAt),
+            lte(commands.expiresAt, now),
+          ),
+        )
+        .returning({ id: commands.id });
+
+      return expired.length;
+    },
+
+    /**
+     * Commands whose push failed and are due another attempt: still `pending`,
+     * not expired, attempts remaining, and past their exponential backoff
+     * window (`backoffSeconds * 2^(attemptCount - 1)` since the last attempt).
+     */
+    async listRetryableCommands(options: {
+      now: Date;
+      backoffSeconds: number;
+      limit: number;
+    }): Promise<Command[]> {
+      const { now, backoffSeconds, limit } = options;
+
+      // Timestamps are passed as ISO strings with an explicit cast: handing a
+      // JS Date to a raw sql`` fragment leaves the driver to guess the
+      // parameter type, and postgres-js rejects it outright.
+      const nowIso = now.toISOString();
+
+      const result = await conn()
+        .select()
+        .from(commands)
+        .where(
+          and(
+            eq(commands.status, 'pending'),
+            lt(commands.attemptCount, commands.maxAttempts),
+            or(isNull(commands.expiresAt), sql`${commands.expiresAt} > ${nowIso}::timestamptz`),
+            or(
+              // Never attempted: no backoff to wait out.
+              isNull(commands.lastAttemptAt),
+              // attempt N waits backoffSeconds * 2^(N-1)
+              sql`${commands.lastAttemptAt} + make_interval(secs => ${backoffSeconds}::float8 * power(2, ${commands.attemptCount} - 1)) <= ${nowIso}::timestamptz`,
+            ),
+          ),
+        )
+        .orderBy(commands.createdAt)
+        .limit(limit);
+
+      return result.map(toCommand);
     },
 
     // ============================================
@@ -681,7 +869,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         createdAt: now,
       };
 
-      await (db as any).insert(events).values(eventData);
+      await conn().insert(events).values(eventData);
 
       return {
         ...eventData,
@@ -690,7 +878,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     },
 
     async listEvents(filter?: EventFilter): Promise<MDMEvent[]> {
-      let query = (db as any).select().from(events);
+      let query = conn().select().from(events);
 
       const conditions: (SQL | undefined)[] = [];
 
@@ -723,12 +911,12 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     // ============================================
 
     async findGroup(id: string): Promise<Group | null> {
-      const result = await (db as any).select().from(groups).where(eq(groups.id, id)).limit(1);
+      const result = await conn().select().from(groups).where(eq(groups.id, id)).limit(1);
       return result[0] ? toGroup(result[0]) : null;
     },
 
     async listGroups(): Promise<Group[]> {
-      const result = await (db as any).select().from(groups).orderBy(groups.name);
+      const result = await conn().select().from(groups).orderBy(groups.name);
       return result.map(toGroup);
     },
 
@@ -747,7 +935,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         updatedAt: now,
       };
 
-      await (db as any).insert(groups).values(groupData);
+      await conn().insert(groups).values(groupData);
 
       return this.findGroup(id) as Promise<Group>;
     },
@@ -763,17 +951,17 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       if (data.parentId !== undefined) updateData.parentId = data.parentId;
       if (data.metadata !== undefined) updateData.metadata = data.metadata;
 
-      await (db as any).update(groups).set(updateData).where(eq(groups.id, id));
+      await conn().update(groups).set(updateData).where(eq(groups.id, id));
 
       return this.findGroup(id) as Promise<Group>;
     },
 
     async deleteGroup(id: string): Promise<void> {
-      await (db as any).delete(groups).where(eq(groups.id, id));
+      await conn().delete(groups).where(eq(groups.id, id));
     },
 
     async listDevicesInGroup(groupId: string): Promise<Device[]> {
-      const result = await (db as any)
+      const result = await conn()
         .select({ device: devices })
         .from(deviceGroups)
         .innerJoin(devices, eq(deviceGroups.deviceId, devices.id))
@@ -783,7 +971,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     },
 
     async addDeviceToGroup(deviceId: string, groupId: string): Promise<void> {
-      await (db as any).insert(deviceGroups).values({
+      await conn().insert(deviceGroups).values({
         deviceId,
         groupId,
         createdAt: new Date(),
@@ -791,13 +979,13 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     },
 
     async removeDeviceFromGroup(deviceId: string, groupId: string): Promise<void> {
-      await (db as any)
+      await conn()
         .delete(deviceGroups)
         .where(and(eq(deviceGroups.deviceId, deviceId), eq(deviceGroups.groupId, groupId)));
     },
 
     async getDeviceGroups(deviceId: string): Promise<Group[]> {
-      const result = await (db as any)
+      const result = await conn()
         .select({ group: groups })
         .from(deviceGroups)
         .innerJoin(groups, eq(deviceGroups.groupId, groups.id))
@@ -811,7 +999,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     // ============================================
 
     async findPushToken(deviceId: string, provider: string): Promise<PushToken | null> {
-      const result = await (db as any)
+      const result = await conn()
         .select()
         .from(pushTokens)
         .where(and(eq(pushTokens.deviceId, deviceId), eq(pushTokens.provider, provider as any)))
@@ -824,7 +1012,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       const now = new Date();
 
       if (existing) {
-        await (db as any)
+        await conn()
           .update(pushTokens)
           .set({
             token: data.token,
@@ -837,7 +1025,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       }
 
       const id = generateId();
-      await (db as any).insert(pushTokens).values({
+      await conn().insert(pushTokens).values({
         id,
         deviceId: data.deviceId,
         provider: data.provider,
@@ -852,11 +1040,11 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
     async deletePushToken(deviceId: string, provider?: string): Promise<void> {
       if (provider) {
-        await (db as any)
+        await conn()
           .delete(pushTokens)
           .where(and(eq(pushTokens.deviceId, deviceId), eq(pushTokens.provider, provider as any)));
       } else {
-        await (db as any).delete(pushTokens).where(eq(pushTokens.deviceId, deviceId));
+        await conn().delete(pushTokens).where(eq(pushTokens.deviceId, deviceId));
       }
     },
 
@@ -867,7 +1055,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     ...(appVersions
       ? {
           async listAppVersions(packageName: string): Promise<AppVersion[]> {
-            const result = await (db as any)
+            const result = await conn()
               .select()
               .from(appVersions)
               .where(eq(appVersions.packageName, packageName))
@@ -893,9 +1081,9 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
               createdAt: now,
             };
 
-            await (db as any).insert(appVersions).values(versionData);
+            await conn().insert(appVersions).values(versionData);
 
-            const result = await (db as any)
+            const result = await conn()
               .select()
               .from(appVersions)
               .where(eq(appVersions.id, id))
@@ -905,13 +1093,13 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
 
           async setMinimumVersion(packageName: string, versionCode: number): Promise<void> {
             // First, unset all minimum versions for this package
-            await (db as any)
+            await conn()
               .update(appVersions)
               .set({ isMinimumVersion: false })
               .where(eq(appVersions.packageName, packageName));
 
             // Then set the new minimum version
-            await (db as any)
+            await conn()
               .update(appVersions)
               .set({ isMinimumVersion: true })
               .where(
@@ -923,7 +1111,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
           },
 
           async getMinimumVersion(packageName: string): Promise<AppVersion | null> {
-            const result = await (db as any)
+            const result = await conn()
               .select()
               .from(appVersions)
               .where(
@@ -949,7 +1137,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
             const now = new Date();
 
             // Get current version info for the from_version fields
-            const deviceResult = await (db as any)
+            const deviceResult = await conn()
               .select()
               .from(devices)
               .where(eq(devices.id, data.deviceId))
@@ -962,7 +1150,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
             );
 
             // Get target version info
-            const targetVersionResult = await (db as any)
+            const targetVersionResult = await conn()
               .select()
               .from(appVersions!)
               .where(
@@ -989,9 +1177,9 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
               createdAt: now,
             };
 
-            await (db as any).insert(rollbacks).values(rollbackData);
+            await conn().insert(rollbacks).values(rollbackData);
 
-            const result = await (db as any)
+            const result = await conn()
               .select()
               .from(rollbacks)
               .where(eq(rollbacks.id, id))
@@ -1006,9 +1194,9 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
             if (data.error !== undefined) updateData.error = data.error;
             if (data.completedAt !== undefined) updateData.completedAt = data.completedAt;
 
-            await (db as any).update(rollbacks).set(updateData).where(eq(rollbacks.id, id));
+            await conn().update(rollbacks).set(updateData).where(eq(rollbacks.id, id));
 
-            const result = await (db as any)
+            const result = await conn()
               .select()
               .from(rollbacks)
               .where(eq(rollbacks.id, id))
@@ -1020,7 +1208,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
             deviceId?: string;
             packageName?: string;
           }): Promise<AppRollback[]> {
-            let query = (db as any).select().from(rollbacks);
+            let query = conn().select().from(rollbacks);
 
             const conditions: (SQL | undefined)[] = [];
 
@@ -1055,7 +1243,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     ...(pluginStorage
       ? {
           async getPluginValue(pluginName: string, key: string): Promise<unknown> {
-            const rows = await (db as any)
+            const rows = await conn()
               .select()
               .from(pluginStorage)
               .where(and(eq(pluginStorage.pluginName, pluginName), eq(pluginStorage.key, key)))
@@ -1068,7 +1256,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
             // Postgres upsert: on conflict (plugin_name, key) update value + updated_at.
             // This keeps writes idempotent and last-writer-wins, which matches
             // the semantics the plugin-storage interface promises.
-            await (db as any)
+            await conn()
               .insert(pluginStorage)
               .values({
                 pluginName,
@@ -1087,7 +1275,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
           },
 
           async deletePluginValue(pluginName: string, key: string): Promise<void> {
-            await (db as any)
+            await conn()
               .delete(pluginStorage)
               .where(and(eq(pluginStorage.pluginName, pluginName), eq(pluginStorage.key, key)));
           },
@@ -1096,7 +1284,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
             const whereExpr = prefix
               ? and(eq(pluginStorage.pluginName, pluginName), like(pluginStorage.key, `${prefix}%`))
               : eq(pluginStorage.pluginName, pluginName);
-            const rows = await (db as any)
+            const rows = await conn()
               .select({ key: pluginStorage.key })
               .from(pluginStorage)
               .where(whereExpr);
@@ -1104,7 +1292,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
           },
 
           async clearPluginData(pluginName: string): Promise<void> {
-            await (db as any).delete(pluginStorage).where(eq(pluginStorage.pluginName, pluginName));
+            await conn().delete(pluginStorage).where(eq(pluginStorage.pluginName, pluginName));
           },
         }
       : {}),
@@ -1122,16 +1310,18 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     ...(enrollmentChallenges
       ? {
           async createEnrollmentChallenge(challenge: EnrollmentChallenge): Promise<void> {
-            await (db as any).insert(enrollmentChallenges).values({
-              challenge: challenge.challenge,
-              expiresAt: challenge.expiresAt,
-              consumedAt: challenge.consumedAt ?? null,
-              createdAt: challenge.createdAt,
-            });
+            await conn()
+              .insert(enrollmentChallenges)
+              .values({
+                challenge: challenge.challenge,
+                expiresAt: challenge.expiresAt,
+                consumedAt: challenge.consumedAt ?? null,
+                createdAt: challenge.createdAt,
+              });
           },
 
           async findEnrollmentChallenge(challenge: string): Promise<EnrollmentChallenge | null> {
-            const rows = await (db as any)
+            const rows = await conn()
               .select()
               .from(enrollmentChallenges)
               .where(eq(enrollmentChallenges.challenge, challenge))
@@ -1152,7 +1342,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
             // challenge. Two concurrent calls can't both succeed
             // because the second one sees consumed_at IS NOT NULL
             // and no row matches.
-            const rows = await (db as any)
+            const rows = await conn()
               .update(enrollmentChallenges)
               .set({ consumedAt: new Date() })
               .where(
@@ -1173,7 +1363,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
           },
 
           async pruneExpiredEnrollmentChallenges(now: Date): Promise<number> {
-            const rows = await (db as any)
+            const rows = await conn()
               .delete(enrollmentChallenges)
               .where(
                 and(
@@ -1191,10 +1381,22 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     // Transaction Support
     // ============================================
 
+    /**
+     * Run `fn` inside a database transaction.
+     *
+     * Adapter calls made from `fn` execute on the transaction handle, so they
+     * commit or roll back together. Previously this opened a transaction and
+     * then ran `fn` against the *outer* connection, so nothing inside it was
+     * actually transactional — a partial failure left half-written state.
+     *
+     * Nested calls join the enclosing transaction rather than opening a second
+     * one.
+     */
     async transaction<T>(fn: () => Promise<T>): Promise<T> {
-      return db.transaction(async () => {
+      if (txStorage.getStore()) {
         return fn();
-      });
+      }
+      return db.transaction(async (tx) => txStorage.run(tx, () => fn()));
     },
   };
 }
