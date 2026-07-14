@@ -92,6 +92,7 @@ import type {
   UpdateDeviceInput,
   UpdateGroupInput,
   UpdatePolicyInput,
+  VerifyDeviceTokenOptions,
   WebhookManager,
 } from './types';
 import {
@@ -947,11 +948,29 @@ export function createMDM(config: MDMConfig): MDMInstance {
       );
     }
 
-    // HMAC path (Phase 2a): unchanged behavior.
+    // HMAC path (Phase 2a).
     if (!isPinnedKeyPath && enrollment?.deviceSecret) {
       const isValid = verifyEnrollmentSignature(request, enrollment.deviceSecret);
       if (!isValid) {
         throw new EnrollmentError('Invalid enrollment signature');
+      }
+
+      // The timestamp is covered by the HMAC signature, so enforcing
+      // freshness bounds how long a captured enrollment request can be
+      // replayed. The pinned-key path needs no equivalent: its single-use
+      // challenge already prevents replay.
+      const toleranceSeconds = enrollment.timestampToleranceSeconds ?? 900;
+      if (toleranceSeconds > 0) {
+        const requestTime = parseEnrollmentTimestamp(request.timestamp);
+        if (requestTime === null) {
+          throw new EnrollmentError('Enrollment timestamp is not a valid ISO-8601 or epoch value');
+        }
+        if (Math.abs(Date.now() - requestTime) > toleranceSeconds * 1000) {
+          throw new EnrollmentError(
+            'Enrollment timestamp is outside the acceptable window. Check the device ' +
+              'clock, or adjust enrollment.timestampToleranceSeconds.',
+          );
+        }
       }
     }
 
@@ -1268,7 +1287,10 @@ export function createMDM(config: MDMConfig): MDMInstance {
   // Token Verification
   // ============================================
 
-  const verifyDeviceToken = async (token: string): Promise<{ deviceId: string } | null> => {
+  const verifyDeviceToken = async (
+    token: string,
+    options?: VerifyDeviceTokenOptions,
+  ): Promise<{ deviceId: string } | null> => {
     try {
       const tokenSecret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
 
@@ -1279,20 +1301,29 @@ export function createMDM(config: MDMConfig): MDMInstance {
 
       const [header, payload, signature] = parts;
 
-      // Verify signature
       const expectedSignature = createHmac('sha256', tokenSecret)
         .update(`${header}.${payload}`)
         .digest('base64url');
 
-      if (signature !== expectedSignature) {
+      // Constant-time comparison: a plain !== leaks how many leading bytes
+      // of a forged signature match via response timing.
+      const signatureBuf = Buffer.from(signature, 'base64url');
+      const expectedBuf = Buffer.from(expectedSignature, 'base64url');
+      if (
+        signatureBuf.length !== expectedBuf.length ||
+        !timingSafeEqual(signatureBuf, expectedBuf)
+      ) {
         return null;
       }
 
       // Decode payload
       const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
 
-      // Check expiration
-      if (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000)) {
+      // Check expiration. `ignoreExpirationWithinSeconds` exists solely for
+      // the token-renewal path, so an agent that slept past its expiry can
+      // exchange the stale token for a fresh one instead of self-unenrolling.
+      const graceSeconds = options?.ignoreExpirationWithinSeconds ?? 0;
+      if (decoded.exp && decoded.exp + graceSeconds < Math.floor(Date.now() / 1000)) {
         return null;
       }
 
@@ -1300,6 +1331,28 @@ export function createMDM(config: MDMConfig): MDMInstance {
     } catch {
       return null;
     }
+  };
+
+  const issueDeviceToken = async (
+    deviceId: string,
+  ): Promise<{ token: string; expiresAt: Date }> => {
+    const device = await database.findDevice(deviceId);
+    if (!device) {
+      throw new DeviceNotFoundError(deviceId);
+    }
+    // Renewal is the revocation point: unenrolling or blocking a device
+    // stops it from ever obtaining a new token, so a leaked token is only
+    // useful until its own expiry.
+    if (device.status !== 'enrolled' && device.status !== 'pending') {
+      throw new EnrollmentError(
+        `Cannot issue a device token for a device with status '${device.status}'`,
+      );
+    }
+
+    const tokenSecret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
+    const tokenExpiration = config.auth?.deviceTokenExpiration || 365 * 24 * 60 * 60;
+    const token = generateDeviceToken(device.id, tokenSecret, tokenExpiration);
+    return { token, expiresAt: new Date(Date.now() + tokenExpiration * 1000) };
   };
 
   // ============================================
@@ -1332,6 +1385,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
     enroll,
     processHeartbeat,
     verifyDeviceToken,
+    issueDeviceToken,
     getPlugins,
     getPlugin,
     // Enterprise managers (optional)
@@ -1451,6 +1505,25 @@ function createStubPushAdapter(logger: Logger): PushAdapter {
 // ============================================
 // Utility Functions
 // ============================================
+
+/**
+ * Parse an enrollment timestamp into epoch milliseconds. Accepts ISO-8601
+ * strings (what @openmdm/client sends) and numeric epoch values (seconds or
+ * milliseconds) for agents that sign a raw epoch. Returns null when the value
+ * cannot be interpreted.
+ */
+function parseEnrollmentTimestamp(timestamp: string | number | undefined): number | null {
+  if (timestamp === undefined || timestamp === null || timestamp === '') {
+    return null;
+  }
+  if (typeof timestamp === 'number' || /^\d+$/.test(String(timestamp))) {
+    const n = Number(timestamp);
+    // Values below 1e12 are epoch seconds (until the year 33658), above are milliseconds.
+    return n < 1e12 ? n * 1000 : n;
+  }
+  const parsed = Date.parse(String(timestamp));
+  return Number.isNaN(parsed) ? null : parsed;
+}
 
 export function verifyEnrollmentSignature(request: EnrollmentRequest, secret: string): boolean {
   const { signature, ...data } = request;
