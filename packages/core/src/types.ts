@@ -19,6 +19,14 @@ export interface Device {
    * single-tenant deployments.
    */
   tenantId?: string | null;
+  /**
+   * The policy version this device last reported having applied. Compared
+   * against the assigned policy's `version` to detect drift. `null` when the
+   * device has never reported one.
+   */
+  appliedPolicyVersion?: number | null;
+  /** When the device last reported its applied policy version. */
+  policyAppliedAt?: Date | null;
   externalId?: string | null;
   enrollmentId: string;
   status: DeviceStatus;
@@ -103,6 +111,10 @@ export interface CreateDeviceInput {
 }
 
 export interface UpdateDeviceInput {
+  /** Policy version the device reports having applied. */
+  appliedPolicyVersion?: number | null;
+  /** When the device reported its applied policy version. */
+  policyAppliedAt?: Date | null;
   externalId?: string | null;
   status?: DeviceStatus;
   policyId?: string | null;
@@ -161,8 +173,71 @@ export interface Policy {
   description?: string | null;
   isDefault: boolean;
   settings: PolicySettings;
+  /**
+   * Monotonic revision, starting at 1 and incremented on every change to
+   * `settings`. Renaming a policy does not bump it — only a change a device
+   * would have to act on does.
+   *
+   * This is what makes "is this device running the current policy?" a
+   * question with an answer. Devices report the version they have applied in
+   * their heartbeat; core compares the two (see {@link PolicyCompliance}).
+   */
+  version: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * An immutable snapshot of a policy's settings at one version. Written on
+ * every settings change, so a policy's history is replayable and any prior
+ * version can be rolled back to.
+ */
+export interface PolicyVersion {
+  id: string;
+  policyId: string;
+  version: number;
+  settings: PolicySettings;
+  /** The user who made the change, when it came through a scoped instance. */
+  createdBy?: string | null;
+  /** Free-text note, e.g. the reason for a rollback. */
+  note?: string | null;
+  createdAt: Date;
+}
+
+/**
+ * Where a device stands relative to its assigned policy.
+ *
+ * - `compliant` — the device has applied the current version.
+ * - `pending` — a newer version exists; the device has not reported it yet.
+ *   Normal and transient right after a policy change.
+ * - `unknown` — the device has never reported a policy version (an old agent,
+ *   or one that has not checked in since being assigned).
+ * - `unassigned` — no policy is assigned to the device.
+ */
+export type PolicyComplianceStatus = 'compliant' | 'pending' | 'unknown' | 'unassigned';
+
+export interface DevicePolicyCompliance {
+  deviceId: string;
+  policyId?: string | null;
+  /** Current version of the assigned policy. */
+  currentVersion?: number | null;
+  /** Version the device last reported having applied. */
+  appliedVersion?: number | null;
+  status: PolicyComplianceStatus;
+  /** When the device last reported a policy version. */
+  lastReportedAt?: Date | null;
+}
+
+/** Fleet-level rollout state for one policy. */
+export interface PolicyCompliance {
+  policyId: string;
+  version: number;
+  total: number;
+  compliant: number;
+  pending: number;
+  unknown: number;
+  /** Devices that have not applied the current version, for follow-up. */
+  laggingDeviceIds: string[];
 }
 
 export interface PolicySettings {
@@ -261,6 +336,8 @@ export interface PolicyApplication {
 export interface CreatePolicyInput {
   /** Owning tenant. Injected automatically by a tenant-scoped instance. */
   tenantId?: string;
+  /** Set by core; callers do not pass this. */
+  version?: number;
   name: string;
   description?: string;
   isDefault?: boolean;
@@ -268,6 +345,8 @@ export interface CreatePolicyInput {
 }
 
 export interface UpdatePolicyInput {
+  /** Set by core when settings change; callers do not pass this. */
+  version?: number;
   name?: string;
   description?: string | null;
   isDefault?: boolean;
@@ -551,6 +630,9 @@ export type EventType =
   | 'app.stopped'
   | 'policy.applied'
   | 'policy.failed'
+  | 'policy.updated'
+  | 'policy.rolledBack'
+  | 'device.policyDrifted'
   | 'command.received'
   | 'command.acknowledged'
   | 'command.completed'
@@ -1220,6 +1302,19 @@ export interface DatabaseAdapter {
    */
   supportsTenantScoping?: boolean;
 
+  /**
+   * Persist an immutable snapshot of a policy's settings. Called on every
+   * settings change. Adapters that do not implement it lose policy history and
+   * rollback, but versioning and drift detection still work.
+   */
+  createPolicyVersion?(data: Omit<PolicyVersion, 'id' | 'createdAt'>): Promise<PolicyVersion>;
+
+  /** Versions of a policy, newest first. */
+  listPolicyVersions?(policyId: string): Promise<PolicyVersion[]>;
+
+  /** One version of a policy. */
+  findPolicyVersion?(policyId: string, version: number): Promise<PolicyVersion | null>;
+
   createCommandIdempotent?(data: SendCommandInput): Promise<{ command: Command; created: boolean }>;
 
   /** Look up a command by its per-device idempotency key. */
@@ -1588,6 +1683,8 @@ export interface MDMInstance {
 // ============================================
 
 export interface DeviceManager {
+  /** Where this device stands relative to its assigned policy. */
+  getPolicyCompliance(deviceId: string): Promise<DevicePolicyCompliance>;
   get(id: string): Promise<Device | null>;
   getByEnrollmentId(enrollmentId: string): Promise<Device | null>;
   list(filter?: DeviceFilter): Promise<DeviceListResult>;
@@ -1615,6 +1712,26 @@ export interface PolicyManager {
   setDefault(id: string): Promise<Policy>;
   getDevices(policyId: string): Promise<Device[]>;
   applyToDevice(policyId: string, deviceId: string): Promise<void>;
+
+  /** Every version of this policy, newest first. */
+  history(policyId: string): Promise<PolicyVersion[]>;
+
+  /** One historical version, or null if it never existed. */
+  getVersion(policyId: string, version: number): Promise<PolicyVersion | null>;
+
+  /**
+   * Restore a policy's settings to an earlier version.
+   *
+   * This moves *forward*, not backward: the restored settings are written as a
+   * NEW version (n+1) rather than resetting the counter. A device that already
+   * applied version 5 must be able to tell that "5 again, but rolled back" is
+   * something it has to re-apply — rewinding the counter would make the
+   * rollback invisible to it.
+   */
+  rollback(policyId: string, toVersion: number, options?: { note?: string }): Promise<Policy>;
+
+  /** Rollout state for this policy across the fleet. */
+  getCompliance(policyId: string): Promise<PolicyCompliance>;
 }
 
 export interface ApplicationManager {
@@ -2300,6 +2417,19 @@ export interface EventPayloadMap {
   'app.stopped': { device: Device; packageName: string };
   'policy.applied': { device: Device; policy: Policy };
   'policy.failed': { device: Device; policy: Policy; error: string };
+  'policy.updated': { policy: Policy; previousVersion: number; affectedDeviceCount: number };
+  'policy.rolledBack': { policy: Policy; fromVersion: number; restoredVersion: number };
+  /**
+   * A device reported a policy version older than the current one. Fired on
+   * heartbeat, so a device that never converges keeps announcing itself rather
+   * than going quiet.
+   */
+  'device.policyDrifted': {
+    device: Device;
+    policy: Policy;
+    appliedVersion: number | null;
+    currentVersion: number;
+  };
   'command.received': { device: Device; command: Command };
   'command.acknowledged': { device: Device; command: Command };
   'command.completed': { device: Device; command: Command; result: CommandResult };

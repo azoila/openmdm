@@ -89,6 +89,10 @@ export const mdmDevices = pgTable(
     policyId: varchar('policy_id', { length: 36 }).references(() => mdmPolicies.id, {
       onDelete: 'set null',
     }),
+    // The policy version this device last reported applying. Compared against
+    // mdm_policies.version to detect drift.
+    appliedPolicyVersion: integer('applied_policy_version'),
+    policyAppliedAt: timestamp('policy_applied_at', { withTimezone: true }),
     agentVersion: varchar('agent_version', { length: 50 }), // MDM agent version
     lastHeartbeat: timestamp('last_heartbeat', { withTimezone: true }),
     lastSync: timestamp('last_sync', { withTimezone: true }),
@@ -145,6 +149,9 @@ export const mdmPolicies = pgTable(
     description: text('description'),
     isDefault: boolean('is_default').notNull().default(false),
     settings: json('settings').notNull().$type<Record<string, unknown>>(),
+    // Monotonic; bumped only when `settings` changes. See @openmdm/core's
+    // Policy type.
+    version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -244,6 +251,36 @@ export const mdmCommands = pgTable(
     index('mdm_commands_retry_idx').on(table.status, table.lastAttemptAt),
     // Drives the expiry reaper.
     index('mdm_commands_expires_at_idx').on(table.expiresAt),
+  ],
+);
+
+// ============================================
+// Policy Versions Table
+// ============================================
+
+/**
+ * Immutable snapshots of a policy's settings, one row per version. Written on
+ * every settings change, so history is replayable and any prior version can be
+ * restored.
+ */
+export const mdmPolicyVersions = pgTable(
+  'mdm_policy_versions',
+  {
+    id: varchar('id', { length: 36 }).primaryKey(),
+    policyId: varchar('policy_id', { length: 36 })
+      .notNull()
+      .references(() => mdmPolicies.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    settings: json('settings').notNull().$type<Record<string, unknown>>(),
+    createdBy: varchar('created_by', { length: 36 }),
+    note: text('note'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('mdm_policy_versions_policy_id_idx').on(table.policyId),
+    // One row per (policy, version): a snapshot is written once and never
+    // rewritten, so a duplicate is a bug, not a race to tolerate.
+    uniqueIndex('mdm_policy_versions_policy_version_idx').on(table.policyId, table.version),
   ],
 );
 
@@ -583,6 +620,7 @@ export const mdmSchema = {
   // Tables
   mdmDevices,
   mdmPolicies,
+  mdmPolicyVersions,
   mdmApplications,
   mdmCommands,
   mdmEvents,

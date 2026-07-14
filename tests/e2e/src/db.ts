@@ -6,6 +6,8 @@ import {
   mdmDevices,
   mdmEnrollmentChallenges,
   mdmPluginStorage,
+  mdmPolicies,
+  mdmPolicyVersions,
 } from '../../../packages/adapters/drizzle/src/postgres';
 
 export const DATABASE_URL =
@@ -29,11 +31,19 @@ export async function connect(): Promise<{
 }> {
   const client = postgres(DATABASE_URL, { max: 8, prepare: false });
   const db = drizzle(client, {
-    schema: { mdmPluginStorage, mdmEnrollmentChallenges, mdmDevices, mdmCommands },
+    schema: {
+      mdmPluginStorage,
+      mdmEnrollmentChallenges,
+      mdmDevices,
+      mdmCommands,
+      mdmPolicies,
+      mdmPolicyVersions,
+    },
   });
 
   await bootstrapPluginStorageTable(db);
   await bootstrapEnrollmentChallengesTable(db);
+  await bootstrapPolicyTables(db);
   await bootstrapCommandTables(db);
 
   return {
@@ -151,6 +161,8 @@ async function bootstrapCommandTables(db: TestDB): Promise<void> {
       mac_address VARCHAR(20),
       android_id VARCHAR(50),
       policy_id VARCHAR(36),
+      applied_policy_version INTEGER,
+      policy_applied_at TIMESTAMPTZ,
       agent_version VARCHAR(50),
       public_key TEXT,
       enrollment_method VARCHAR(20),
@@ -181,6 +193,8 @@ async function bootstrapCommandTables(db: TestDB): Promise<void> {
     sql`mac_address VARCHAR(20)`,
     sql`android_id VARCHAR(50)`,
     sql`policy_id VARCHAR(36)`,
+    sql`applied_policy_version INTEGER`,
+    sql`policy_applied_at TIMESTAMPTZ`,
     sql`agent_version VARCHAR(50)`,
     sql`public_key TEXT`,
     sql`enrollment_method VARCHAR(20)`,
@@ -251,8 +265,67 @@ async function bootstrapCommandTables(db: TestDB): Promise<void> {
 }
 
 /**
+ * Policies and their immutable version history.
+ *
+ * The unique index on (policy_id, version) is the load-bearing piece: a
+ * snapshot is written once per version and never rewritten, so a duplicate is a
+ * bug rather than a race to tolerate.
+ */
+async function bootstrapPolicyTables(db: TestDB): Promise<void> {
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS mdm_policies (
+      id VARCHAR(36) PRIMARY KEY,
+      tenant_id VARCHAR(36),
+      name VARCHAR(255) NOT NULL,
+      description TEXT,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      settings JSON NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.execute(sql`
+    ALTER TABLE mdm_policies ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1
+  `);
+  await db.execute(sql`
+    ALTER TABLE mdm_policies ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(36)
+  `);
+
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS mdm_policy_versions (
+      id VARCHAR(36) PRIMARY KEY,
+      policy_id VARCHAR(36) NOT NULL REFERENCES mdm_policies(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      settings JSON NOT NULL,
+      created_by VARCHAR(36),
+      note TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS mdm_policy_versions_policy_id_idx
+      ON mdm_policy_versions (policy_id)
+  `);
+
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS mdm_policy_versions_policy_version_idx
+      ON mdm_policy_versions (policy_id, version)
+  `);
+}
+
+/**
  * Wipe devices (and, by cascade, commands) between tests.
  */
 export async function resetDevicesAndCommands(db: TestDB): Promise<void> {
   await db.execute(sql`TRUNCATE TABLE mdm_devices CASCADE`);
+}
+
+/**
+ * Wipe policies and, by cascade, their version history.
+ */
+export async function resetPolicies(db: TestDB): Promise<void> {
+  await db.execute(sql`TRUNCATE TABLE mdm_policies CASCADE`);
 }
