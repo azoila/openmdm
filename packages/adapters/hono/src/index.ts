@@ -449,10 +449,16 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
         policyUpdate = await mdm.policies.get(device.policyId);
       }
 
+      // Desired state rides on every heartbeat until the device reports it has
+      // applied that version. That is what makes it a fact the device cannot
+      // miss — unlike a command, which is an event: miss it and the intent is
+      // simply gone.
       return agentOkResponse(c, {
         success: true,
         pendingCommands: pendingCommands,
         policyUpdate: policyUpdate,
+        desiredState: device?.desiredState ?? {},
+        desiredStateVersion: device?.desiredStateVersion ?? 0,
       });
     });
 

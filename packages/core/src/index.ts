@@ -22,7 +22,7 @@
  * ```
  */
 
-import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import { createAuditManager } from './audit';
 import { createAuthorizationManager } from './authorization';
 import { createScopedInstance } from './context';
@@ -45,6 +45,7 @@ import { createTenantManager } from './tenant';
 import type {
   Application,
   ApplicationManager,
+  AppRollout,
   AuditManager,
   AuthorizationManager,
   Command,
@@ -59,10 +60,13 @@ import type {
   DashboardManager,
   DeployTarget,
   Device,
+  DeviceApp,
+  DeviceConvergence,
   DeviceFilter,
   DeviceListResult,
   DeviceManager,
   DevicePolicyCompliance,
+  DeviceStatus,
   EnrollmentChallenge,
   EnrollmentRequest,
   EnrollmentResponse,
@@ -100,13 +104,16 @@ import type {
   UpdateApplicationInput,
   UpdateDeviceInput,
   UpdateGroupInput,
+  UpdateManager,
   UpdatePolicyInput,
+  UpdateReconcileResult,
   VerifyDeviceTokenOptions,
   WebhookManager,
 } from './types';
 import {
   ApplicationNotFoundError,
   CommandNotFoundError,
+  DEVICE_STATUS_TRANSITIONS,
   DeviceNotFoundError,
   EnrollmentError,
   PolicyNotFoundError,
@@ -506,6 +513,83 @@ export function createMDM(config: MDMConfig): MDMInstance {
     return updated ?? command;
   };
 
+  // ============================================
+  // Device Lifecycle
+  // ============================================
+
+  const deviceLog = logger.child({ component: 'devices' });
+
+  const updateDefaults = {
+    backoffSeconds: config.updates?.retryBackoffSeconds ?? 60 * 60,
+    maxAttempts: config.updates?.maxAttempts ?? 5,
+  };
+
+  /**
+   * Reject an illegal status transition.
+   *
+   * Every status write goes through here. `devices.update` used to accept any
+   * status from anywhere, so a device could go from `unenrolled` straight back
+   * to `enrolled` without ever re-enrolling.
+   */
+  const assertTransition = (from: DeviceStatus, to: DeviceStatus): void => {
+    if (from === to) return;
+
+    const legal = DEVICE_STATUS_TRANSITIONS[from];
+    if (!legal.includes(to)) {
+      throw new ValidationError(
+        `Illegal device status transition: ${from} → ${to}. ` +
+          `Legal transitions from '${from}': ${legal.length ? legal.join(', ') : 'none (terminal)'}.`,
+      );
+    }
+  };
+
+  /**
+   * Deterministic 0–99 bucket for a device, for a specific rollout.
+   *
+   * Salted with the target version, deliberately. Hashing the device id alone
+   * would put the same devices in buckets 0–9 for every release, forever — the
+   * same unlucky 10% of the fleet would be the canary for every bad build we
+   * ever ship. Salting draws an independent slice per version.
+   *
+   * Stable within a rollout: the same device lands in the same bucket on every
+   * sweep, so it cannot drift in and out of a partial rollout between beats.
+   */
+  const rolloutBucket = (deviceId: string, version: string): number => {
+    return createHash('sha256').update(`${deviceId}:${version}`).digest().readUInt32BE(0) % 100;
+  };
+
+  const shallowEqual = (a: Record<string, unknown>, b: Record<string, unknown>): boolean => {
+    const aKeys = Object.keys(a);
+    const bKeys = Object.keys(b);
+    if (aKeys.length !== bKeys.length) return false;
+    return aKeys.every((key) => a[key] === b[key]);
+  };
+
+  /**
+   * Compare dotted numeric versions. Returns <0, 0, >0.
+   *
+   * An unparseable part makes the comparison *fail closed* — we report the
+   * device as NOT up to date rather than silently equal. Treating `1.2.0-rc` as
+   * "equal to target" means the device is never updated and nobody finds out.
+   */
+  const compareVersions = (a: string, b: string): number => {
+    const parse = (v: string) => v.split('.').map((part) => Number.parseInt(part, 10));
+    const av = parse(a);
+    const bv = parse(b);
+    const len = Math.max(av.length, bv.length);
+
+    for (let i = 0; i < len; i++) {
+      const x = av[i] ?? 0;
+      const y = bv[i] ?? 0;
+      if (Number.isNaN(x) || Number.isNaN(y)) {
+        // Not comparable — assume out of date so the update is attempted.
+        return -1;
+      }
+      if (x !== y) return x < y ? -1 : 1;
+    }
+    return 0;
+  };
+
   const devices: DeviceManager = {
     async getPolicyCompliance(deviceId: string): Promise<DevicePolicyCompliance> {
       const device = await database.findDevice(deviceId);
@@ -546,11 +630,18 @@ export function createMDM(config: MDMConfig): MDMInstance {
     },
 
     async get(id: string): Promise<Device | null> {
-      return database.findDevice(id);
+      const device = await database.findDevice(id);
+      // A retired device reads as gone. Its row survives for audit — that is the
+      // point of the tombstone — but a caller asking "give me this device" should
+      // not be handed one that was unenrolled last March.
+      if (!device || device.deletedAt) return null;
+      return device;
     },
 
     async getByEnrollmentId(enrollmentId: string): Promise<Device | null> {
-      return database.findDeviceByEnrollmentId(enrollmentId);
+      const device = await database.findDeviceByEnrollmentId(enrollmentId);
+      if (!device || device.deletedAt) return null;
+      return device;
     },
 
     async list(filter?: DeviceFilter): Promise<DeviceListResult> {
@@ -573,6 +664,10 @@ export function createMDM(config: MDMConfig): MDMInstance {
       const oldDevice = await database.findDevice(id);
       if (!oldDevice) {
         throw new DeviceNotFoundError(id);
+      }
+
+      if (data.status) {
+        assertTransition(oldDevice.status, data.status);
       }
 
       const device = await database.updateDevice(id, data);
@@ -598,16 +693,228 @@ export function createMDM(config: MDMConfig): MDMInstance {
       return device;
     },
 
-    async delete(id: string): Promise<void> {
+    /**
+     * Retire a device.
+     *
+     * This is a soft delete: the row is tombstoned (`deletedAt`) and dropped
+     * from listings, but its command and audit history survive. It used to be a
+     * hard DELETE, which cascaded away everything the device had ever done — so
+     * the one question you ask after a bad unenroll ("what happened to this
+     * device?") was the one question the data could no longer answer.
+     *
+     * Pass `{ hard: true }` for a genuine erase (GDPR and the like).
+     */
+    async delete(id: string, options?: { hard?: boolean }): Promise<void> {
       const device = await database.findDevice(id);
-      if (device) {
-        await database.deleteDevice(id);
-        await emit('device.unenrolled', { device });
+      if (!device) return;
 
-        if (config.onDeviceUnenrolled) {
-          await config.onDeviceUnenrolled(device);
+      if (options?.hard) {
+        deviceLog.warn(
+          { deviceId: id },
+          'Hard-deleting device — its command and audit history go with it',
+        );
+        await database.deleteDevice(id);
+      } else {
+        assertTransition(device.status, 'unenrolled');
+        await database.updateDevice(id, {
+          status: 'unenrolled',
+          deletedAt: new Date(),
+        });
+      }
+
+      await emit('device.unenrolled', { device });
+
+      if (config.onDeviceUnenrolled) {
+        await config.onDeviceUnenrolled(device);
+      }
+    },
+
+    // ============================================
+    // Lifecycle
+    // ============================================
+
+    async block(id: string, reason?: string): Promise<Device> {
+      const device = await database.findDevice(id);
+      if (!device) throw new DeviceNotFoundError(id);
+
+      assertTransition(device.status, 'blocked');
+      const blocked = await database.updateDevice(id, { status: 'blocked' });
+
+      deviceLog.info({ deviceId: id, reason }, 'Device blocked');
+      await emit('device.blocked', { device: blocked, reason });
+      return blocked;
+    },
+
+    async unblock(id: string): Promise<Device> {
+      const device = await database.findDevice(id);
+      if (!device) throw new DeviceNotFoundError(id);
+
+      assertTransition(device.status, 'enrolled');
+      const restored = await database.updateDevice(id, { status: 'enrolled' });
+
+      deviceLog.info({ deviceId: id }, 'Device unblocked');
+      await emit('device.statusChanged', {
+        device: restored,
+        oldStatus: device.status,
+        newStatus: 'enrolled',
+      });
+      return restored;
+    },
+
+    async beginUnenroll(
+      id: string,
+      options?: { wipe?: boolean; reason?: string },
+    ): Promise<Device> {
+      const device = await database.findDevice(id);
+      if (!device) throw new DeviceNotFoundError(id);
+
+      assertTransition(device.status, 'unenrolling');
+      const arming = await database.updateDevice(id, { status: 'unenrolling' });
+
+      // Tell the device to go. It is not considered gone until it says so — or
+      // until an operator forces it. Flipping straight to `unenrolled` here is
+      // exactly the bug: the row says the device left, while the device (which
+      // never got the message) keeps heartbeating at a server that no longer
+      // recognises it.
+      await this.sendCommand(id, {
+        type: options?.wipe ? 'factoryReset' : 'unenroll',
+        // The same unenroll must not queue twice if an operator clicks twice.
+        idempotencyKey: `unenroll:${id}`,
+      });
+
+      deviceLog.info(
+        { deviceId: id, wipe: Boolean(options?.wipe), reason: options?.reason },
+        'Device armed for unenroll',
+      );
+      await emit('device.statusChanged', {
+        device: arming,
+        oldStatus: device.status,
+        newStatus: 'unenrolling',
+      });
+
+      return arming;
+    },
+
+    async completeUnenroll(id: string, options?: { force?: boolean }): Promise<Device> {
+      const device = await database.findDevice(id);
+      if (!device) throw new DeviceNotFoundError(id);
+
+      if (device.status !== 'unenrolling' && !options?.force) {
+        throw new ValidationError(
+          `Device ${id} is '${device.status}', not 'unenrolling'. Call beginUnenroll first, ` +
+            'or pass { force: true } to unenroll a device that never acknowledged.',
+        );
+      }
+
+      assertTransition(device.status, 'unenrolled');
+      const gone = await database.updateDevice(id, {
+        status: 'unenrolled',
+        deletedAt: new Date(),
+      });
+
+      deviceLog.info({ deviceId: id, forced: Boolean(options?.force) }, 'Device unenrolled');
+      await emit('device.unenrolled', { device: gone });
+
+      if (config.onDeviceUnenrolled) {
+        await config.onDeviceUnenrolled(gone);
+      }
+
+      return gone;
+    },
+
+    async cancelUnenroll(id: string): Promise<Device> {
+      const device = await database.findDevice(id);
+      if (!device) throw new DeviceNotFoundError(id);
+
+      if (device.status !== 'unenrolling') {
+        throw new ValidationError(
+          `Device ${id} is not being unenrolled (status: ${device.status})`,
+        );
+      }
+
+      assertTransition(device.status, 'enrolled');
+      const restored = await database.updateDevice(id, { status: 'enrolled' });
+
+      deviceLog.info({ deviceId: id }, 'Unenroll cancelled');
+      await emit('device.statusChanged', {
+        device: restored,
+        oldStatus: 'unenrolling',
+        newStatus: 'enrolled',
+      });
+      return restored;
+    },
+
+    // ============================================
+    // Desired state
+    // ============================================
+
+    async setDesiredState(id: string, patch: Record<string, unknown>): Promise<Device> {
+      const device = await database.findDevice(id);
+      if (!device) throw new DeviceNotFoundError(id);
+
+      const current = device.desiredState ?? {};
+      const merged: Record<string, unknown> = { ...current };
+
+      // `null` deletes a key rather than storing null. "Unset" and "set to
+      // nothing" are different facts: an unset `maintenanceMode` means the
+      // server has no opinion, which is not the same as "maintenance mode off".
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) {
+          delete merged[key];
+        } else {
+          merged[key] = value;
         }
       }
+
+      // No-op short-circuit: if nothing actually changed, do not bump the
+      // version. Otherwise an operator clicking a toggle that is already in the
+      // desired position re-versions the state, and every device in the fleet
+      // dutifully re-reports convergence for a change that never happened.
+      if (shallowEqual(current, merged)) {
+        deviceLog.debug({ deviceId: id }, 'Desired state unchanged — not bumping version');
+        return device;
+      }
+
+      const version = (device.desiredStateVersion ?? 0) + 1;
+      const updated = await database.updateDevice(id, {
+        desiredState: merged,
+        desiredStateVersion: version,
+      });
+
+      deviceLog.info({ deviceId: id, version, keys: Object.keys(patch) }, 'Desired state updated');
+      return updated;
+    },
+
+    async getConvergence(id: string): Promise<DeviceConvergence> {
+      const device = await database.findDevice(id);
+      if (!device) throw new DeviceNotFoundError(id);
+
+      const desiredVersion = device.desiredStateVersion ?? 0;
+      const reportedVersion = device.reportedStateVersion ?? null;
+
+      const apps = database.listDeviceApps ? await database.listDeviceApps(id) : [];
+      const pendingApps = apps
+        .filter((app) => app.desiredVersion && app.desiredVersion !== app.observedVersion)
+        .map((app) => app.packageName);
+
+      return {
+        deviceId: id,
+        desiredStateVersion: desiredVersion,
+        reportedStateVersion: reportedVersion,
+        converged: (reportedVersion ?? -1) >= desiredVersion && pendingApps.length === 0,
+        pendingApps,
+        lastReportedAt: device.stateReportedAt ?? null,
+      };
+    },
+
+    async getApps(id: string): Promise<DeviceApp[]> {
+      if (!database.listDeviceApps) {
+        throw new Error(
+          'Database adapter does not support canonical app inventory ' +
+            '(listDeviceApps). Upgrade to an adapter that does.',
+        );
+      }
+      return database.listDeviceApps(id);
     },
 
     async assignPolicy(deviceId: string, policyId: string | null): Promise<Device> {
@@ -1845,6 +2152,53 @@ export function createMDM(config: MDMConfig): MDMInstance {
       }
     }
 
+    // Sync the canonical app inventory, and announce version changes.
+    //
+    // App versions used to be overwritten inside the `installed_apps` JSON blob
+    // with no record that anything had changed, so "when did this fleet start
+    // running the broken build?" had no answer. The diff below is that answer.
+    if (heartbeat.installedApps && database.syncDeviceApps) {
+      const before = database.listDeviceApps ? await database.listDeviceApps(deviceId) : [];
+      const beforeByPackage = new Map(before.map((app) => [app.packageName, app]));
+
+      await database.syncDeviceApps(deviceId, heartbeat.installedApps);
+
+      for (const app of heartbeat.installedApps) {
+        const previous = beforeByPackage.get(app.packageName);
+        const from = previous?.observedVersion ?? null;
+        if (from !== app.version) {
+          await emit('device.appVersionChanged', {
+            device: updatedDevice,
+            packageName: app.packageName,
+            fromVersion: from,
+            toVersion: app.version,
+          });
+        }
+      }
+    }
+
+    // Convergence: the device reports which desired-state version it has
+    // applied. Desired state rides on every heartbeat until this matches, which
+    // is what makes it a fact the device cannot simply miss — unlike a command.
+    const reportedStateVersion = parsePolicyVersion(heartbeat.desiredStateVersion);
+    if (reportedStateVersion !== null) {
+      const converged =
+        reportedStateVersion >= (updatedDevice.desiredStateVersion ?? 0) &&
+        (updatedDevice.reportedStateVersion ?? -1) < reportedStateVersion;
+
+      await database.updateDevice(deviceId, {
+        reportedStateVersion,
+        stateReportedAt: heartbeat.timestamp ?? new Date(),
+      });
+
+      if (converged) {
+        await emit('device.converged', {
+          device: updatedDevice,
+          stateVersion: reportedStateVersion,
+        });
+      }
+    }
+
     // Call config hook if defined
     if (config.onHeartbeat) {
       await config.onHeartbeat(updatedDevice, heartbeat);
@@ -1941,6 +2295,184 @@ export function createMDM(config: MDMConfig): MDMInstance {
   };
 
   // ============================================
+  // App Update Enforcement
+  // ============================================
+
+  const updateLog = logger.child({ component: 'updates' });
+
+  const updates: UpdateManager = {
+    async setDesiredAppVersion(rollout: AppRollout): Promise<{ targeted: number }> {
+      if (!database.setDesiredAppVersion) {
+        throw new Error(
+          'Database adapter does not support app update enforcement ' +
+            '(setDesiredAppVersion). Upgrade to an adapter that does.',
+        );
+      }
+
+      const percentage = rollout.rolloutPercentage ?? 100;
+
+      // Every device still in the fleet — NOT just `enrolled`. A device awaiting
+      // approval is still a device that will need the app, and a rollout that
+      // silently skips `pending` devices targets nothing at all on a freshly
+      // provisioned fleet. Retired devices are excluded by listDevices itself.
+      const { devices: fleet } = await database.listDevices({ limit: 100_000 });
+      const all = fleet.filter(
+        (device) => device.status !== 'unenrolled' && device.status !== 'unenrolling',
+      );
+
+      const targeted = all.filter((device) => {
+        if (percentage >= 100) return true;
+        // Bucketed by (deviceId, version), so each release draws its own slice.
+        return rolloutBucket(device.id, rollout.version) < percentage;
+      });
+
+      await database.setDesiredAppVersion(
+        targeted.map((device) => device.id),
+        rollout.packageName,
+        rollout.version,
+        rollout.versionCode,
+      );
+
+      updateLog.info(
+        {
+          packageName: rollout.packageName,
+          version: rollout.version,
+          rolloutPercentage: percentage,
+          targeted: targeted.length,
+          fleet: all.length,
+        },
+        'Desired app version set',
+      );
+
+      return { targeted: targeted.length };
+    },
+
+    async reconcile(options?: { limit?: number }): Promise<UpdateReconcileResult> {
+      const result: UpdateReconcileResult = {
+        converged: 0,
+        issued: 0,
+        backoff: 0,
+        escalated: 0,
+      };
+
+      if (!database.listAppsNeedingUpdate) {
+        updateLog.warn(
+          'Database adapter does not implement listAppsNeedingUpdate — app updates ' +
+            'are declared but never enforced, which is worse than not declaring them.',
+        );
+        return result;
+      }
+
+      const now = new Date();
+      const pending = await database.listAppsNeedingUpdate({
+        now,
+        backoffSeconds: updateDefaults.backoffSeconds,
+        limit: options?.limit ?? 100,
+      });
+
+      for (const app of pending) {
+        if (!app.desiredVersion) continue;
+
+        // A device that has never installed the app reports no version. Treat
+        // that as 0.0.0, NOT as "skip": skipping means an app that was never
+        // installed can never BE installed through this path, which turns the
+        // whole engine into an upgrade-only mechanism and quietly leaves fresh
+        // devices without the app they were provisioned for.
+        const observed = app.observedVersion ?? '0.0.0';
+
+        if (compareVersions(observed, app.desiredVersion) >= 0) {
+          result.converged += 1;
+          continue;
+        }
+
+        // Escalate once, then go quiet. A device that has taken the install five
+        // times and is still on the old version is not going to fix itself, and
+        // repeating the attempt every sweep buries the signal an operator needs.
+        if (app.updateAttempts >= updateDefaults.maxAttempts) {
+          if (!app.escalatedAt && database.escalateAppUpdate) {
+            await database.escalateAppUpdate(app.deviceId, app.packageName);
+            result.escalated += 1;
+
+            const device = await database.findDevice(app.deviceId);
+            if (device) {
+              await emit('device.updateEscalated', {
+                device,
+                packageName: app.packageName,
+                desiredVersion: app.desiredVersion,
+                observedVersion: app.observedVersion ?? null,
+                attempts: app.updateAttempts,
+              });
+            }
+
+            updateLog.error(
+              {
+                deviceId: app.deviceId,
+                packageName: app.packageName,
+                desiredVersion: app.desiredVersion,
+                observedVersion: app.observedVersion,
+                attempts: app.updateAttempts,
+              },
+              'Device keeps taking the install and not converging — needs manual intervention',
+            );
+          }
+          continue;
+        }
+
+        // Issue the install. The idempotency key is scoped to the target
+        // version, so re-issuing after a failure is the same logical action —
+        // but a NEW target version is a new action and queues properly.
+        const application = await database.findApplicationByPackage(
+          app.packageName,
+          app.desiredVersion,
+        );
+
+        if (!application) {
+          updateLog.warn(
+            { packageName: app.packageName, version: app.desiredVersion },
+            'Desired app version has no registered application — upload the APK first',
+          );
+          continue;
+        }
+
+        await devices.sendCommand(app.deviceId, {
+          type: 'installApp',
+          payload: {
+            packageName: app.packageName,
+            url: application.url,
+            version: application.version,
+            versionCode: application.versionCode,
+            // Verified by the agent before install. Without it, a compromised
+            // download channel is arbitrary code execution as Device Owner.
+            ...(application.hash ? { expectedSha256: application.hash } : {}),
+          },
+          idempotencyKey: `app-update:${app.packageName}:${app.desiredVersion}:${app.updateAttempts}`,
+        });
+
+        if (database.recordAppUpdateAttempt) {
+          await database.recordAppUpdateAttempt(app.deviceId, app.packageName);
+        }
+
+        result.issued += 1;
+      }
+
+      if (pending.length > 0) {
+        updateLog.info({ ...result }, 'App update reconcile complete');
+      }
+
+      return result;
+    },
+
+    async listEscalated(packageName?: string): Promise<DeviceApp[]> {
+      if (!database.listEscalatedApps) {
+        throw new Error(
+          'Database adapter does not support app update enforcement (listEscalatedApps).',
+        );
+      }
+      return database.listEscalatedApps(packageName);
+    },
+  };
+
+  // ============================================
   // Create Instance
   // ============================================
 
@@ -1971,6 +2503,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
         auditEnabled: Boolean(config.audit?.enabled),
       });
     },
+    updates,
     enroll,
     processHeartbeat,
     verifyDeviceToken,

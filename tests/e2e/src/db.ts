@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import {
   mdmCommands,
+  mdmDeviceApps,
   mdmDevices,
   mdmEnrollmentChallenges,
   mdmPluginStorage,
@@ -38,6 +39,7 @@ export async function connect(): Promise<{
       mdmCommands,
       mdmPolicies,
       mdmPolicyVersions,
+      mdmDeviceApps,
     },
   });
 
@@ -45,6 +47,7 @@ export async function connect(): Promise<{
   await bootstrapEnrollmentChallengesTable(db);
   await bootstrapPolicyTables(db);
   await bootstrapCommandTables(db);
+  await bootstrapDeviceAppsTable(db);
 
   return {
     db,
@@ -163,6 +166,11 @@ async function bootstrapCommandTables(db: TestDB): Promise<void> {
       policy_id VARCHAR(36),
       applied_policy_version INTEGER,
       policy_applied_at TIMESTAMPTZ,
+      desired_state JSONB,
+      desired_state_version INTEGER NOT NULL DEFAULT 0,
+      reported_state_version INTEGER,
+      state_reported_at TIMESTAMPTZ,
+      deleted_at TIMESTAMPTZ,
       agent_version VARCHAR(50),
       public_key TEXT,
       enrollment_method VARCHAR(20),
@@ -195,6 +203,11 @@ async function bootstrapCommandTables(db: TestDB): Promise<void> {
     sql`policy_id VARCHAR(36)`,
     sql`applied_policy_version INTEGER`,
     sql`policy_applied_at TIMESTAMPTZ`,
+    sql`desired_state JSONB`,
+    sql`desired_state_version INTEGER NOT NULL DEFAULT 0`,
+    sql`reported_state_version INTEGER`,
+    sql`state_reported_at TIMESTAMPTZ`,
+    sql`deleted_at TIMESTAMPTZ`,
     sql`agent_version VARCHAR(50)`,
     sql`public_key TEXT`,
     sql`enrollment_method VARCHAR(20)`,
@@ -313,6 +326,34 @@ async function bootstrapPolicyTables(db: TestDB): Promise<void> {
   await db.execute(sql`
     CREATE UNIQUE INDEX IF NOT EXISTS mdm_policy_versions_policy_version_idx
       ON mdm_policy_versions (policy_id, version)
+  `);
+}
+
+/**
+ * Canonical per-(device, app) inventory + update-enforcement state.
+ */
+async function bootstrapDeviceAppsTable(db: TestDB): Promise<void> {
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS mdm_device_apps (
+      device_id VARCHAR(36) NOT NULL REFERENCES mdm_devices(id) ON DELETE CASCADE,
+      package_name VARCHAR(255) NOT NULL,
+      observed_version VARCHAR(50),
+      observed_version_code INTEGER,
+      observed_at TIMESTAMPTZ,
+      desired_version VARCHAR(50),
+      desired_version_code INTEGER,
+      update_attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at TIMESTAMPTZ,
+      escalated_at TIMESTAMPTZ,
+      PRIMARY KEY (device_id, package_name)
+    )
+  `);
+
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS mdm_device_apps_package_idx ON mdm_device_apps (package_name)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS mdm_device_apps_escalated_idx ON mdm_device_apps (escalated_at)
   `);
 }
 
