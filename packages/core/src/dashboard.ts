@@ -131,6 +131,7 @@ export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
         pending: 0,
         enrolled: 0,
         blocked: 0,
+        unenrolling: 0,
         unenrolled: 0,
       };
 

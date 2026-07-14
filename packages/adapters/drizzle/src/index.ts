@@ -34,6 +34,7 @@ import type {
   CreatePolicyInput,
   DatabaseAdapter,
   Device,
+  DeviceApp,
   DeviceFilter,
   DeviceListResult,
   DeviceLocation,
@@ -63,6 +64,7 @@ import {
   like,
   lt,
   lte,
+  not,
   or,
   type SQL,
   sql,
@@ -74,6 +76,7 @@ import type {
   mdmApplications,
   mdmAppVersions,
   mdmCommands,
+  mdmDeviceApps,
   mdmDeviceGroups,
   mdmDevices,
   mdmEnrollmentChallenges,
@@ -126,6 +129,11 @@ export interface DrizzleAdapterOptions {
      */
     policyVersions?: typeof mdmPolicyVersions;
     /**
+     * Canonical app inventory. Required for app update enforcement
+     * (mdm.updates) and for querying devices by installed app version.
+     */
+    deviceApps?: typeof mdmDeviceApps;
+    /**
      * Phase 2b enrollment challenges table. Required for
      * device-pinned-key enrollment. Omit to run enrollment in
      * legacy HMAC-only mode.
@@ -165,6 +173,7 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     pluginStorage,
     enrollmentChallenges,
     policyVersions,
+    deviceApps,
   } = tables;
 
   // Helper to generate IDs
@@ -187,6 +196,11 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     policyId: row.policyId as string | null,
     appliedPolicyVersion: (row.appliedPolicyVersion as number | null) ?? null,
     policyAppliedAt: (row.policyAppliedAt as Date | null) ?? null,
+    desiredState: (row.desiredState as Record<string, unknown> | null) ?? null,
+    desiredStateVersion: (row.desiredStateVersion as number | null) ?? 0,
+    reportedStateVersion: (row.reportedStateVersion as number | null) ?? null,
+    stateReportedAt: (row.stateReportedAt as Date | null) ?? null,
+    deletedAt: (row.deletedAt as Date | null) ?? null,
     agentVersion: row.agentVersion as string | null,
     lastHeartbeat: row.lastHeartbeat as Date | null,
     lastSync: row.lastSync as Date | null,
@@ -263,6 +277,20 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     expiresAt: (row.expiresAt as Date | null) ?? null,
     attemptCount: (row.attemptCount as number | null) ?? 0,
     maxAttempts: (row.maxAttempts as number | null) ?? 5,
+  });
+
+  // Helper to transform DB row to DeviceApp
+  const toDeviceApp = (row: Record<string, unknown>): DeviceApp => ({
+    deviceId: row.deviceId as string,
+    packageName: row.packageName as string,
+    observedVersion: (row.observedVersion as string | null) ?? null,
+    observedVersionCode: (row.observedVersionCode as number | null) ?? null,
+    observedAt: (row.observedAt as Date | null) ?? null,
+    desiredVersion: (row.desiredVersion as string | null) ?? null,
+    desiredVersionCode: (row.desiredVersionCode as number | null) ?? null,
+    updateAttempts: (row.updateAttempts as number | null) ?? 0,
+    lastAttemptAt: (row.lastAttemptAt as Date | null) ?? null,
+    escalatedAt: (row.escalatedAt as Date | null) ?? null,
   });
 
   // Helper to transform DB row to PolicyVersion
@@ -377,6 +405,12 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
         conditions.push(eq(devices.tenantId, filter.tenantId));
       }
 
+      // A retired device keeps its row for audit, but it must not show up in a
+      // device list just because the row still exists.
+      if (!filter?.includeDeleted) {
+        conditions.push(isNull(devices.deletedAt));
+      }
+
       if (filter?.status) {
         if (Array.isArray(filter.status)) {
           conditions.push(inArray(devices.status, filter.status));
@@ -463,6 +497,13 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       if (data.appliedPolicyVersion !== undefined)
         updateData.appliedPolicyVersion = data.appliedPolicyVersion;
       if (data.policyAppliedAt !== undefined) updateData.policyAppliedAt = data.policyAppliedAt;
+      if (data.desiredState !== undefined) updateData.desiredState = data.desiredState;
+      if (data.desiredStateVersion !== undefined)
+        updateData.desiredStateVersion = data.desiredStateVersion;
+      if (data.reportedStateVersion !== undefined)
+        updateData.reportedStateVersion = data.reportedStateVersion;
+      if (data.stateReportedAt !== undefined) updateData.stateReportedAt = data.stateReportedAt;
+      if (data.deletedAt !== undefined) updateData.deletedAt = data.deletedAt;
       if (data.agentVersion !== undefined) updateData.agentVersion = data.agentVersion;
       if (data.model !== undefined) updateData.model = data.model;
       if (data.manufacturer !== undefined) updateData.manufacturer = data.manufacturer;
@@ -731,6 +772,185 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
       await conn().insert(commands).values(commandData);
 
       return this.findCommand(id) as Promise<Command>;
+    },
+
+    // ============================================
+    // Canonical App Inventory / Update Enforcement
+    // ============================================
+
+    async syncDeviceApps(deviceId: string, apps: any[]): Promise<void> {
+      if (!deviceApps) return;
+
+      const now = new Date();
+
+      // Upsert what the device reports. We deliberately do NOT delete rows for
+      // apps that disappeared: a row can carry a *desired* version for an app
+      // that is not installed yet (that is how a first install is expressed), and
+      // deleting it would erase the intent. Uninstalled apps simply have their
+      // observed version cleared.
+      for (const app of apps) {
+        await conn()
+          .insert(deviceApps)
+          .values({
+            deviceId,
+            packageName: app.packageName,
+            observedVersion: app.version ?? null,
+            observedVersionCode: app.versionCode ?? null,
+            observedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [deviceApps.deviceId, deviceApps.packageName],
+            set: {
+              observedVersion: app.version ?? null,
+              observedVersionCode: app.versionCode ?? null,
+              observedAt: now,
+            },
+          });
+      }
+
+      // Clear the observed version for apps the device no longer reports.
+      //
+      // The empty case is NOT a no-op: a device that reports zero installed apps
+      // has uninstalled everything, and skipping the clear would leave the whole
+      // inventory frozen at the last non-empty heartbeat.
+      const reported = apps.map((app) => app.packageName);
+      const stale = and(
+        eq(deviceApps.deviceId, deviceId),
+        isNotNull(deviceApps.observedVersion),
+        ...(reported.length > 0 ? [not(inArray(deviceApps.packageName, reported))] : []),
+      );
+
+      await conn()
+        .update(deviceApps)
+        .set({ observedVersion: null, observedVersionCode: null, observedAt: now })
+        .where(stale);
+    },
+
+    async listDeviceApps(deviceId: string): Promise<any[]> {
+      if (!deviceApps) return [];
+
+      const result = await conn()
+        .select()
+        .from(deviceApps)
+        .where(eq(deviceApps.deviceId, deviceId));
+
+      return result.map(toDeviceApp);
+    },
+
+    async setDesiredAppVersion(
+      deviceIds: string[],
+      packageName: string,
+      version: string,
+      versionCode?: number,
+    ): Promise<void> {
+      if (!deviceApps || deviceIds.length === 0) return;
+
+      for (const deviceId of deviceIds) {
+        await conn()
+          .insert(deviceApps)
+          .values({
+            deviceId,
+            packageName,
+            desiredVersion: version,
+            desiredVersionCode: versionCode ?? null,
+            updateAttempts: 0,
+          })
+          .onConflictDoUpdate({
+            target: [deviceApps.deviceId, deviceApps.packageName],
+            set: {
+              desiredVersion: version,
+              desiredVersionCode: versionCode ?? null,
+              // A new target is a fresh start: reset the attempt counter and
+              // clear any escalation. A device stranded on the last version
+              // deserves a clean shot at this one.
+              updateAttempts: 0,
+              lastAttemptAt: null,
+              escalatedAt: null,
+            },
+          });
+      }
+    },
+
+    async listAppsNeedingUpdate(options: {
+      now: Date;
+      backoffSeconds: number;
+      limit: number;
+    }): Promise<any[]> {
+      if (!deviceApps) return [];
+
+      const { now, backoffSeconds, limit } = options;
+      const nowIso = now.toISOString();
+
+      const result = await conn()
+        .select()
+        .from(deviceApps)
+        .where(
+          and(
+            isNotNull(deviceApps.desiredVersion),
+            // The comparison is a plain string inequality here — the ordering
+            // decision is made in core, which understands version semantics. This
+            // only has to be a cheap filter that never excludes a device that
+            // might need work.
+            or(
+              isNull(deviceApps.observedVersion),
+              sql`${deviceApps.observedVersion} <> ${deviceApps.desiredVersion}`,
+            ),
+            or(
+              isNull(deviceApps.lastAttemptAt),
+              sql`${deviceApps.lastAttemptAt} + make_interval(secs => ${backoffSeconds}::float8 * power(2, greatest(${deviceApps.updateAttempts} - 1, 0))) <= ${nowIso}::timestamptz`,
+            ),
+          ),
+        )
+        .orderBy(deviceApps.lastAttemptAt)
+        .limit(limit);
+
+      return result.map(toDeviceApp);
+    },
+
+    async recordAppUpdateAttempt(deviceId: string, packageName: string): Promise<void> {
+      if (!deviceApps) return;
+
+      await conn()
+        .update(deviceApps)
+        .set({
+          updateAttempts: sql`${deviceApps.updateAttempts} + 1`,
+          lastAttemptAt: new Date(),
+        })
+        .where(and(eq(deviceApps.deviceId, deviceId), eq(deviceApps.packageName, packageName)));
+    },
+
+    async escalateAppUpdate(deviceId: string, packageName: string): Promise<void> {
+      if (!deviceApps) return;
+
+      await conn()
+        .update(deviceApps)
+        .set({ escalatedAt: new Date() })
+        .where(
+          and(
+            eq(deviceApps.deviceId, deviceId),
+            eq(deviceApps.packageName, packageName),
+            // Escalate once. Re-stamping on every sweep would make "when did this
+            // device get stuck?" unanswerable.
+            isNull(deviceApps.escalatedAt),
+          ),
+        );
+    },
+
+    async listEscalatedApps(packageName?: string): Promise<any[]> {
+      if (!deviceApps) return [];
+
+      const conditions = [isNotNull(deviceApps.escalatedAt)];
+      if (packageName) {
+        conditions.push(eq(deviceApps.packageName, packageName));
+      }
+
+      const result = await conn()
+        .select()
+        .from(deviceApps)
+        .where(and(...conditions))
+        .orderBy(desc(deviceApps.escalatedAt));
+
+      return result.map(toDeviceApp);
     },
 
     // ============================================

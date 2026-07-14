@@ -89,7 +89,7 @@ export const mdmSchema: SchemaDefinition = {
         enrollment_id: { type: 'string', unique: true },
         status: {
           type: 'enum',
-          enumValues: ['pending', 'enrolled', 'unenrolled', 'blocked'],
+          enumValues: ['pending', 'enrolled', 'unenrolled', 'blocked', 'unenrolling'],
           default: 'pending',
         },
 
@@ -112,6 +112,13 @@ export const mdmSchema: SchemaDefinition = {
         // Policy compliance: the version the device reports having applied.
         applied_policy_version: { type: 'integer', nullable: true },
         policy_applied_at: { type: 'datetime', nullable: true },
+        // Declarative state the agent reconciles toward.
+        desired_state: { type: 'json', nullable: true },
+        desired_state_version: { type: 'integer', default: 0 },
+        reported_state_version: { type: 'integer', nullable: true },
+        state_reported_at: { type: 'datetime', nullable: true },
+        // Soft-delete tombstone: retiring a device must not take its history.
+        deleted_at: { type: 'datetime', nullable: true },
         // Device-pinned-key enrollment (Phase 2b).
         public_key: { type: 'text', nullable: true },
         enrollment_method: { type: 'string', nullable: true },
@@ -781,6 +788,37 @@ export const mdmSchema: SchemaDefinition = {
         created_at: { type: 'datetime', default: 'now' },
       },
       indexes: [{ columns: ['expires_at'] }],
+    },
+
+    // ----------------------------------------
+    // Device Apps Table (canonical inventory)
+    // ----------------------------------------
+    // One row per (device, package): what is installed, and what should be. The
+    // installed_apps JSON on the device row remains the full inventory; this is
+    // the queryable form of the facts the update engine acts on. A reconcile
+    // loop cannot express "observed != desired" against a JSON blob.
+    mdm_device_apps: {
+      columns: {
+        device_id: {
+          type: 'string',
+          references: { table: 'mdm_devices', column: 'id', onDelete: 'cascade' },
+        },
+        package_name: { type: 'string' },
+        observed_version: { type: 'string', nullable: true },
+        observed_version_code: { type: 'integer', nullable: true },
+        observed_at: { type: 'datetime', nullable: true },
+        desired_version: { type: 'string', nullable: true },
+        desired_version_code: { type: 'integer', nullable: true },
+        update_attempts: { type: 'integer', default: 0 },
+        last_attempt_at: { type: 'datetime', nullable: true },
+        escalated_at: { type: 'datetime', nullable: true },
+      },
+      indexes: [
+        { columns: ['device_id', 'package_name'], unique: true },
+        { columns: ['package_name'] },
+        { columns: ['package_name', 'observed_version'] },
+        { columns: ['escalated_at'] },
+      ],
     },
 
     mdm_plugin_storage: {

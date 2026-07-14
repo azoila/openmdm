@@ -9,7 +9,40 @@
 // Device Types
 // ============================================
 
-export type DeviceStatus = 'pending' | 'enrolled' | 'unenrolled' | 'blocked';
+/**
+ * Device lifecycle states.
+ *
+ * `unenrolling` is the "armed" state of a two-phase unenroll: the server has
+ * decided the device should go, and has told it to, but the device has not yet
+ * confirmed. Flipping straight to `unenrolled` is what breaks fleets — the row
+ * says the device is gone while the device, which never received the message,
+ * keeps heartbeating against a server that no longer recognises it.
+ */
+export type DeviceStatus = 'pending' | 'enrolled' | 'blocked' | 'unenrolling' | 'unenrolled';
+
+/**
+ * Legal device status transitions.
+ *
+ * Every status write goes through this table. Before it existed, `devices.update`
+ * accepted any status from anywhere, and `devices.delete` hard-deleted the row —
+ * so "unenroll" and "erase all history of this device" were the same operation,
+ * and a device could go from `unenrolled` back to `enrolled` without ever
+ * re-enrolling.
+ */
+export const DEVICE_STATUS_TRANSITIONS: Record<DeviceStatus, readonly DeviceStatus[]> = {
+  // Awaiting approval.
+  pending: ['enrolled', 'blocked', 'unenrolling', 'unenrolled'],
+  // The normal working state.
+  enrolled: ['blocked', 'unenrolling', 'unenrolled'],
+  // Administratively suspended; can be restored, or sent on its way.
+  blocked: ['enrolled', 'unenrolling', 'unenrolled'],
+  // Armed for unenroll. Can still be called off — a device that never got the
+  // message, or an operator who changed their mind, must be able to come back.
+  unenrolling: ['unenrolled', 'enrolled', 'blocked'],
+  // Terminal. A device that comes back must enroll again, which creates a fresh
+  // row rather than resurrecting this one.
+  unenrolled: [],
+} as const;
 
 export interface Device {
   id: string;
@@ -27,6 +60,40 @@ export interface Device {
   appliedPolicyVersion?: number | null;
   /** When the device last reported its applied policy version. */
   policyAppliedAt?: Date | null;
+
+  /**
+   * What the server wants this device to look like — a declarative blob the
+   * agent reconciles toward, rather than a sequence of imperative commands it
+   * might miss.
+   *
+   * Commands are events: miss one and the intent is gone. Desired state is a
+   * fact: it rides on every heartbeat until the device reports it has converged.
+   * That is why "put this device in maintenance mode" belongs here and not in a
+   * command — a maintenance flag that only exists client-side, or only in a
+   * command the device never received, is a device nobody can account for.
+   */
+  desiredState?: Record<string, unknown> | null;
+
+  /**
+   * Bumped every time `desiredState` changes. The device echoes back the version
+   * it has applied; `reportedStateVersion >= desiredStateVersion` means
+   * converged.
+   */
+  desiredStateVersion?: number;
+
+  /** The desired-state version the device last reported having applied. */
+  reportedStateVersion?: number | null;
+
+  /** When the device last reported its desired-state version. */
+  stateReportedAt?: Date | null;
+
+  /**
+   * Soft-delete tombstone. `devices.delete()` used to hard-DELETE the row, which
+   * took the device's entire command and audit history with it — so the one
+   * question you ask after a bad unenroll ("what happened to this device?") was
+   * the one question the data could no longer answer.
+   */
+  deletedAt?: Date | null;
   externalId?: string | null;
   enrollmentId: string;
   status: DeviceStatus;
@@ -93,6 +160,65 @@ export interface InstalledApp {
   installedAt?: Date;
 }
 
+/**
+ * One app on one device: what is actually installed, and what should be.
+ *
+ * App inventory used to live only inside the `installed_apps` JSON blob on the
+ * device row, so "which devices are running player < 2.0?" meant walking JSON
+ * for every device in the fleet. This is the canonical, queryable form, and it
+ * is what the update engine reconciles against.
+ */
+export interface DeviceApp {
+  deviceId: string;
+  packageName: string;
+
+  /** What the device reports having installed. `null` = not installed. */
+  observedVersion?: string | null;
+  observedVersionCode?: number | null;
+  observedAt?: Date | null;
+
+  /** What the server wants installed. `null` = no opinion. */
+  desiredVersion?: string | null;
+  desiredVersionCode?: number | null;
+
+  /** Install attempts made for the current desired version. */
+  updateAttempts: number;
+  lastAttemptAt?: Date | null;
+
+  /**
+   * Set when the device has taken the install command repeatedly and the version
+   * still has not moved. The device is not going to fix itself; a human needs to
+   * look. Distinct from a delivery failure, which the command retry sweep owns.
+   */
+  escalatedAt?: Date | null;
+}
+
+/** Where a device stands relative to its desired state. */
+export interface DeviceConvergence {
+  deviceId: string;
+  desiredStateVersion: number;
+  reportedStateVersion: number | null;
+  converged: boolean;
+  /** Apps whose observed version does not match the desired one. */
+  pendingApps: string[];
+  lastReportedAt?: Date | null;
+}
+
+/**
+ * A staged app rollout.
+ *
+ * `rolloutPercentage` is applied by hashing the device id, not by sampling at
+ * random: the same device must land in the same bucket on every evaluation, or a
+ * 10% rollout re-rolls the dice on every sweep and eventually hits everyone.
+ */
+export interface AppRollout {
+  packageName: string;
+  version: string;
+  versionCode?: number;
+  /** 0–100. Devices are selected deterministically by `hash(deviceId) % 100`. */
+  rolloutPercentage?: number;
+}
+
 export interface CreateDeviceInput {
   /** Owning tenant. Injected automatically by a tenant-scoped instance. */
   tenantId?: string;
@@ -115,6 +241,13 @@ export interface UpdateDeviceInput {
   appliedPolicyVersion?: number | null;
   /** When the device reported its applied policy version. */
   policyAppliedAt?: Date | null;
+  /** Declarative state the device reconciles toward. */
+  desiredState?: Record<string, unknown> | null;
+  desiredStateVersion?: number;
+  reportedStateVersion?: number | null;
+  stateReportedAt?: Date | null;
+  /** Soft-delete tombstone. */
+  deletedAt?: Date | null;
   externalId?: string | null;
   status?: DeviceStatus;
   policyId?: string | null;
@@ -145,6 +278,11 @@ export interface DeviceFilter {
    * cannot be forgotten.
    */
   tenantId?: string;
+  /**
+   * Exclude soft-deleted devices. Defaults to true — a deleted device should
+   * not show up in a device list just because its row still exists for audit.
+   */
+  includeDeleted?: boolean;
   status?: DeviceStatus | DeviceStatus[];
   policyId?: string;
   groupId?: string;
@@ -478,6 +616,8 @@ export type CommandType =
   | 'unlock'
   | 'wipe'
   | 'factoryReset'
+  /** Leave the fleet cleanly: drop enrollment state without wiping user data. */
+  | 'unenroll'
   | 'installApp'
   | 'uninstallApp'
   | 'updateApp'
@@ -633,6 +773,9 @@ export type EventType =
   | 'policy.updated'
   | 'policy.rolledBack'
   | 'device.policyDrifted'
+  | 'device.converged'
+  | 'device.appVersionChanged'
+  | 'device.updateEscalated'
   | 'command.received'
   | 'command.acknowledged'
   | 'command.requeued'
@@ -869,6 +1012,11 @@ export interface Heartbeat {
   agentVersion?: string;
   policyVersion?: string;
   lastPolicySync?: Date;
+  /**
+   * The desired-state version the device has applied. Echoed back so the server
+   * can tell convergence from "has not got there yet".
+   */
+  desiredStateVersion?: number | string;
 }
 
 // ============================================
@@ -957,6 +1105,23 @@ export interface MDMConfig {
   /** Plugin storage configuration */
   pluginStorage?: {
     adapter: 'database' | 'memory';
+  };
+
+  /** App update enforcement. */
+  updates?: {
+    /**
+     * Base delay between install attempts for the same (device, app), doubling
+     * each attempt. Defaults to 3600 (1 hour) — an app install is expensive and
+     * disruptive; hammering a device that just failed one is worse than waiting.
+     */
+    retryBackoffSeconds?: number;
+
+    /**
+     * Install attempts before the (device, app) is escalated for human
+     * attention. Defaults to 5. A device that has taken the command five times
+     * and is still on the old version is not going to fix itself.
+     */
+    maxAttempts?: number;
   };
 
   /** Command delivery durability defaults. */
@@ -1312,6 +1477,41 @@ export interface DatabaseAdapter {
    * core falls back to find-then-create, which closes the duplicate window
    * only approximately — two concurrent sends can still both insert.
    */
+  // ----- Canonical app inventory -----
+
+  /** Replace a device's app inventory with what it just reported. */
+  syncDeviceApps?(deviceId: string, apps: InstalledApp[]): Promise<void>;
+
+  /** A device's canonical app inventory. */
+  listDeviceApps?(deviceId: string): Promise<DeviceApp[]>;
+
+  /** Set the desired version for an app on specific devices. */
+  setDesiredAppVersion?(
+    deviceIds: string[],
+    packageName: string,
+    version: string,
+    versionCode?: number,
+  ): Promise<void>;
+
+  /**
+   * Devices whose observed app version does not match the desired one, are not
+   * escalated, and whose backoff window has elapsed.
+   */
+  listAppsNeedingUpdate?(options: {
+    now: Date;
+    backoffSeconds: number;
+    limit: number;
+  }): Promise<DeviceApp[]>;
+
+  /** Record an install attempt for a (device, app). */
+  recordAppUpdateAttempt?(deviceId: string, packageName: string): Promise<void>;
+
+  /** Flag a (device, app) for human attention. */
+  escalateAppUpdate?(deviceId: string, packageName: string): Promise<void>;
+
+  /** Escalated (device, app) pairs. */
+  listEscalatedApps?(packageName?: string): Promise<DeviceApp[]>;
+
   /**
    * Declares that this adapter honours `tenantId` on filters and persists it
    * on create. Core refuses to serve a tenant-scoped instance against an
@@ -1708,6 +1908,9 @@ export interface MDMInstance {
    */
   issueDeviceToken(deviceId: string): Promise<{ token: string; expiresAt: Date }>;
 
+  /** App update enforcement (observed-vs-desired reconcile). */
+  updates: UpdateManager;
+
   /** Get loaded plugins */
   getPlugins(): MDMPlugin[];
   /** Get plugin by name */
@@ -1721,6 +1924,55 @@ export interface MDMInstance {
 export interface DeviceManager {
   /** Where this device stands relative to its assigned policy. */
   getPolicyCompliance(deviceId: string): Promise<DevicePolicyCompliance>;
+
+  // ----- Lifecycle -----
+
+  /**
+   * Suspend a device. It stays enrolled and keeps its history; it just stops
+   * being allowed to act.
+   */
+  block(id: string, reason?: string): Promise<Device>;
+
+  /** Lift a block, returning the device to `enrolled`. */
+  unblock(id: string): Promise<Device>;
+
+  /**
+   * Phase one of unenrolling: move to `unenrolling` and tell the device to go.
+   *
+   * The device is NOT considered gone yet. Flipping straight to `unenrolled` is
+   * what breaks fleets — the row says the device left while the device, which
+   * never received the message, keeps heartbeating at a server that no longer
+   * knows it. `wipe: true` also issues a factory reset.
+   */
+  beginUnenroll(id: string, options?: { wipe?: boolean; reason?: string }): Promise<Device>;
+
+  /**
+   * Phase two: the device confirmed (or an operator forced it). Terminal.
+   */
+  completeUnenroll(id: string, options?: { force?: boolean }): Promise<Device>;
+
+  /** Call off an armed unenroll and return the device to service. */
+  cancelUnenroll(id: string): Promise<Device>;
+
+  // ----- Desired state -----
+
+  /**
+   * Merge a patch into the device's desired state and bump its version.
+   *
+   * Desired state is declarative and rides on every heartbeat until the device
+   * reports convergence — unlike a command, which is an event the device can
+   * simply miss.
+   */
+  setDesiredState(id: string, patch: Record<string, unknown>): Promise<Device>;
+
+  /** Where the device stands relative to its desired state. */
+  getConvergence(id: string): Promise<DeviceConvergence>;
+
+  // ----- App inventory -----
+
+  /** Canonical, queryable app inventory for one device. */
+  getApps(id: string): Promise<DeviceApp[]>;
+
   get(id: string): Promise<Device | null>;
   getByEnrollmentId(enrollmentId: string): Promise<Device | null>;
   list(filter?: DeviceFilter): Promise<DeviceListResult>;
@@ -1830,6 +2082,51 @@ export interface CommandManager {
    * `config.commands.ackTimeoutSeconds`.
    */
   sweepStuck(options?: { limit?: number }): Promise<{ requeued: number; deadLettered: number }>;
+}
+
+/**
+ * App update enforcement.
+ *
+ * Issuing an `installApp` command is not the same as an app being installed. The
+ * command can be delivered, acknowledged, and still leave the device on the old
+ * version — a failed install, a crash mid-update, a user who declined. Command
+ * durability (retry, dead-letter) covers *delivery*; nothing covered *outcome*.
+ *
+ * This engine closes that loop: it compares what each device reports having
+ * installed against what it should have, re-issues the install with bounded
+ * backoff, and escalates when a device keeps taking the command and not moving.
+ */
+export interface UpdateManager {
+  /**
+   * Declare the version an app should be on, optionally to a fraction of the
+   * fleet. Devices are selected deterministically by `hash(deviceId) % 100`, so
+   * the same 10% stay in the 10% — sampling at random would re-roll the dice on
+   * every sweep and eventually hit everyone.
+   */
+  setDesiredAppVersion(rollout: AppRollout): Promise<{ targeted: number }>;
+
+  /**
+   * One reconcile pass: for every device whose observed version does not match
+   * its desired one, issue an install (subject to backoff), or escalate if it
+   * has taken the command too many times without converging.
+   *
+   * Call from a scheduled job.
+   */
+  reconcile(options?: { limit?: number }): Promise<UpdateReconcileResult>;
+
+  /** Devices that keep taking the install and not converging. */
+  listEscalated(packageName?: string): Promise<DeviceApp[]>;
+}
+
+export interface UpdateReconcileResult {
+  /** Devices already on the desired version. */
+  converged: number;
+  /** Install commands issued this pass. */
+  issued: number;
+  /** Devices skipped because their backoff window has not elapsed. */
+  backoff: number;
+  /** Devices escalated for human attention this pass. */
+  escalated: number;
 }
 
 export interface GroupManager {
@@ -2455,7 +2752,7 @@ export type EventHandler<T extends EventType> = (
 export interface EventPayloadMap {
   'device.enrolled': { device: Device };
   'device.unenrolled': { device: Device; reason?: string };
-  'device.blocked': { device: Device; reason: string };
+  'device.blocked': { device: Device; reason?: string };
   'device.heartbeat': { device: Device; heartbeat: Heartbeat };
   'device.locationUpdated': { device: Device; location: DeviceLocation };
   'device.statusChanged': { device: Device; oldStatus: DeviceStatus; newStatus: DeviceStatus };
@@ -2470,6 +2767,31 @@ export interface EventPayloadMap {
   'policy.failed': { device: Device; policy: Policy; error: string };
   'policy.updated': { policy: Policy; previousVersion: number; affectedDeviceCount: number };
   'policy.rolledBack': { policy: Policy; fromVersion: number; restoredVersion: number };
+  /** The device reported that it has applied the current desired state. */
+  'device.converged': { device: Device; stateVersion: number };
+  /**
+   * A device reported a different version of an app than we last saw. The diff
+   * used to happen nowhere: versions were overwritten inside a JSON blob with no
+   * record that anything had changed, so "when did this fleet start running the
+   * broken build?" was unanswerable.
+   */
+  'device.appVersionChanged': {
+    device: Device;
+    packageName: string;
+    fromVersion: string | null;
+    toVersion: string | null;
+  };
+  /**
+   * A device has taken an install command repeatedly and its version still has
+   * not moved. A human needs to look.
+   */
+  'device.updateEscalated': {
+    device: Device;
+    packageName: string;
+    desiredVersion: string;
+    observedVersion: string | null;
+    attempts: number;
+  };
   /**
    * A device reported a policy version older than the current one. Fired on
    * heartbeat, so a device that never converges keeps announcing itself rather

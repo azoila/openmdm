@@ -19,6 +19,7 @@ import {
   index,
   integer,
   json,
+  jsonb,
   pgEnum,
   pgTable,
   primaryKey,
@@ -37,6 +38,9 @@ export const deviceStatusEnum = pgEnum('mdm_device_status', [
   'enrolled',
   'unenrolled',
   'blocked',
+  // Armed for unenroll: the server told the device to go, and is waiting for it
+  // to confirm. See DEVICE_STATUS_TRANSITIONS in @openmdm/core.
+  'unenrolling',
 ]);
 
 export const commandStatusEnum = pgEnum('mdm_command_status', [
@@ -93,6 +97,17 @@ export const mdmDevices = pgTable(
     // mdm_policies.version to detect drift.
     appliedPolicyVersion: integer('applied_policy_version'),
     policyAppliedAt: timestamp('policy_applied_at', { withTimezone: true }),
+
+    // Declarative state the agent reconciles toward. jsonb (not json) so it can
+    // be indexed into.
+    desiredState: jsonb('desired_state').$type<Record<string, unknown>>(),
+    desiredStateVersion: integer('desired_state_version').notNull().default(0),
+    reportedStateVersion: integer('reported_state_version'),
+    stateReportedAt: timestamp('state_reported_at', { withTimezone: true }),
+
+    // Soft-delete tombstone. Retiring a device must not take its command and
+    // audit history with it.
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
     agentVersion: varchar('agent_version', { length: 50 }), // MDM agent version
     lastHeartbeat: timestamp('last_heartbeat', { withTimezone: true }),
     lastSync: timestamp('last_sync', { withTimezone: true }),
@@ -281,6 +296,50 @@ export const mdmPolicyVersions = pgTable(
     // One row per (policy, version): a snapshot is written once and never
     // rewritten, so a duplicate is a bug, not a race to tolerate.
     uniqueIndex('mdm_policy_versions_policy_version_idx').on(table.policyId, table.version),
+  ],
+);
+
+// ============================================
+// Device Apps Table (canonical inventory)
+// ============================================
+
+/**
+ * One row per (device, package): what is installed, and what should be.
+ *
+ * App inventory used to live only inside `mdm_devices.installed_apps` JSON, so
+ * "which devices run player < 2.0?" meant walking JSON for every device in the
+ * fleet — and the update reconcile loop could not express its central question
+ * in SQL at all. The JSON blob remains the full inventory; this is the
+ * queryable, canonical form of the facts we act on.
+ */
+export const mdmDeviceApps = pgTable(
+  'mdm_device_apps',
+  {
+    deviceId: varchar('device_id', { length: 36 })
+      .notNull()
+      .references(() => mdmDevices.id, { onDelete: 'cascade' }),
+    packageName: varchar('package_name', { length: 255 }).notNull(),
+
+    // Observed: what the device reports.
+    observedVersion: varchar('observed_version', { length: 50 }),
+    observedVersionCode: integer('observed_version_code'),
+    observedAt: timestamp('observed_at', { withTimezone: true }),
+
+    // Desired: what the server wants.
+    desiredVersion: varchar('desired_version', { length: 50 }),
+    desiredVersionCode: integer('desired_version_code'),
+
+    // Enforcement state.
+    updateAttempts: integer('update_attempts').notNull().default(0),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+    escalatedAt: timestamp('escalated_at', { withTimezone: true }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.deviceId, table.packageName] }),
+    index('mdm_device_apps_package_idx').on(table.packageName),
+    // Drives the reconcile sweep.
+    index('mdm_device_apps_observed_version_idx').on(table.packageName, table.observedVersion),
+    index('mdm_device_apps_escalated_idx').on(table.escalatedAt),
   ],
 );
 
@@ -619,6 +678,7 @@ export const mdmRollbacksRelations = relations(mdmRollbacks, ({ one }) => ({
 export const mdmSchema = {
   // Tables
   mdmDevices,
+  mdmDeviceApps,
   mdmPolicies,
   mdmPolicyVersions,
   mdmApplications,
