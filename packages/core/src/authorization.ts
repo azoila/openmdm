@@ -6,27 +6,22 @@
  */
 
 import type {
-  Role,
-  User,
-  UserWithRoles,
+  AuthorizationManager,
+  CreateRoleInput,
+  CreateUserInput,
+  DatabaseAdapter,
   Permission,
   PermissionAction,
   PermissionResource,
-  AuthorizationManager,
-  CreateRoleInput,
+  Role,
   UpdateRoleInput,
-  CreateUserInput,
   UpdateUserInput,
+  User,
   UserFilter,
   UserListResult,
-  DatabaseAdapter,
+  UserWithRoles,
 } from './types';
-import {
-  UserNotFoundError,
-  RoleNotFoundError,
-  AuthorizationError,
-  ValidationError,
-} from './types';
+import { AuthorizationError, RoleNotFoundError, UserNotFoundError, ValidationError } from './types';
 
 /**
  * Check if an action matches the required action
@@ -53,7 +48,7 @@ function resourceMatches(required: PermissionResource, granted: PermissionResour
  */
 function permissionMatches(
   required: { action: PermissionAction; resource: PermissionResource },
-  granted: Permission
+  granted: Permission,
 ): boolean {
   return (
     actionMatches(required.action, granted.action) &&
@@ -67,7 +62,7 @@ function permissionMatches(
 function hasPermission(
   permissions: Permission[],
   action: PermissionAction,
-  resource: PermissionResource
+  resource: PermissionResource,
 ): boolean {
   return permissions.some((p) => permissionMatches({ action, resource }, p));
 }
@@ -76,9 +71,7 @@ function hasPermission(
  * Check if user has admin permissions (full access)
  */
 function isAdminPermission(permissions: Permission[]): boolean {
-  return permissions.some(
-    (p) => p.action === '*' && p.resource === '*'
-  );
+  return permissions.some((p) => p.action === '*' && p.resource === '*');
 }
 
 /**
@@ -352,7 +345,7 @@ export function createAuthorizationManager(db: DatabaseAdapter): AuthorizationMa
       userId: string,
       action: PermissionAction,
       resource: PermissionResource,
-      _resourceId?: string
+      _resourceId?: string,
     ): Promise<boolean> {
       if (!db.findUser) {
         throw new Error('Database adapter does not support RBAC operations');
@@ -372,19 +365,19 @@ export function createAuthorizationManager(db: DatabaseAdapter): AuthorizationMa
       userId: string,
       action: PermissionAction,
       resource: PermissionResource,
-      resourceId?: string
+      resourceId?: string,
     ): Promise<void> {
       const allowed = await this.can(userId, action, resource, resourceId);
       if (!allowed) {
         throw new AuthorizationError(
-          `Permission denied: ${action} on ${resource}${resourceId ? ` (${resourceId})` : ''}`
+          `Permission denied: ${action} on ${resource}${resourceId ? ` (${resourceId})` : ''}`,
         );
       }
     },
 
     async canAny(
       userId: string,
-      permissions: Array<{ action: PermissionAction; resource: PermissionResource }>
+      permissions: Array<{ action: PermissionAction; resource: PermissionResource }>,
     ): Promise<boolean> {
       if (!db.findUser) {
         throw new Error('Database adapter does not support RBAC operations');
@@ -399,7 +392,7 @@ export function createAuthorizationManager(db: DatabaseAdapter): AuthorizationMa
       const userPermissions = await getAllUserPermissions(userId);
 
       return permissions.some((required) =>
-        hasPermission(userPermissions, required.action, required.resource)
+        hasPermission(userPermissions, required.action, required.resource),
       );
     },
 

@@ -1,8 +1,8 @@
+import type { CreatePolicyInput, MDMInstance, Policy } from '@openmdm/core';
 import chalk from 'chalk';
+import fs from 'fs/promises';
 import inquirer from 'inquirer';
 import ora from 'ora';
-import fs from 'fs/promises';
-import type { CreatePolicyInput, MDMInstance, Policy } from '@openmdm/core';
 import { withMDM } from '../config.js';
 
 interface ListOptions {
@@ -38,13 +38,13 @@ export const listPolicies = withMDM(async (mdm: MDMInstance, options: ListOption
     policies.map(async (p) => {
       const result = await mdm.devices.list({ policyId: p.id, limit: 1 });
       return result.total;
-    })
+    }),
   );
 
   console.log(
     chalk.gray(
-      `${'ID'.padEnd(24)} ${'Name'.padEnd(28)} ${'Default'.padEnd(10)} ${'Devices'.padEnd(10)}`
-    )
+      `${'ID'.padEnd(24)} ${'Name'.padEnd(28)} ${'Default'.padEnd(10)} ${'Devices'.padEnd(10)}`,
+    ),
   );
   console.log(chalk.gray('-'.repeat(75)));
 
@@ -52,8 +52,8 @@ export const listPolicies = withMDM(async (mdm: MDMInstance, options: ListOption
     const defaultStr = policy.isDefault ? chalk.green('Yes') : 'No';
     console.log(
       `${truncate(policy.id, 24).padEnd(24)} ${truncate(policy.name, 28).padEnd(28)} ${defaultStr.padEnd(
-        10
-      )} ${String(counts[i]).padEnd(10)}`
+        10,
+      )} ${String(counts[i]).padEnd(10)}`,
     );
   });
 
@@ -75,14 +75,12 @@ export const showPolicy = withMDM(
     const devicesUsingPolicy = await mdm.devices.list({ policyId: policy.id, limit: 1 });
 
     if (options.json) {
-      console.log(
-        JSON.stringify({ ...policy, deviceCount: devicesUsingPolicy.total }, null, 2)
-      );
+      console.log(JSON.stringify({ ...policy, deviceCount: devicesUsingPolicy.total }, null, 2));
       return;
     }
 
     renderPolicyDetails(policy, devicesUsingPolicy.total);
-  }
+  },
 );
 
 export const createPolicy = withMDM(async (mdm: MDMInstance, options: CreateOptions) => {
@@ -186,22 +184,18 @@ export const createPolicy = withMDM(async (mdm: MDMInstance, options: CreateOpti
   spinner.succeed(`Policy "${policy.name}" created (${policy.id})`);
 });
 
-export const applyPolicy = withMDM(
-  async (mdm: MDMInstance, policyId: string, deviceId: string) => {
-    const spinner = ora(`Applying policy ${policyId} to device ${deviceId}...`).start();
-    await mdm.policies.applyToDevice(policyId, deviceId);
-    spinner.succeed(`Policy ${policyId} applied to device ${deviceId}`);
-    console.log(chalk.gray('The device will receive the new policy on its next sync.'));
-  }
-);
+export const applyPolicy = withMDM(async (mdm: MDMInstance, policyId: string, deviceId: string) => {
+  const spinner = ora(`Applying policy ${policyId} to device ${deviceId}...`).start();
+  await mdm.policies.applyToDevice(policyId, deviceId);
+  spinner.succeed(`Policy ${policyId} applied to device ${deviceId}`);
+  console.log(chalk.gray('The device will receive the new policy on its next sync.'));
+});
 
 function renderPolicyDetails(policy: Policy, deviceCount: number): void {
   console.log(chalk.blue(`\n📋 Policy: ${policy.name}\n`));
   console.log(`  ${chalk.gray('ID:          ')} ${policy.id}`);
   console.log(`  ${chalk.gray('Description: ')} ${policy.description ?? '-'}`);
-  console.log(
-    `  ${chalk.gray('Default:     ')} ${policy.isDefault ? chalk.green('Yes') : 'No'}`
-  );
+  console.log(`  ${chalk.gray('Default:     ')} ${policy.isDefault ? chalk.green('Yes') : 'No'}`);
   console.log(`  ${chalk.gray('Devices:     ')} ${deviceCount}`);
   console.log(`  ${chalk.gray('Created:     ')} ${policy.createdAt.toISOString()}`);
   console.log(`  ${chalk.gray('Updated:     ')} ${policy.updatedAt.toISOString()}`);
@@ -211,7 +205,7 @@ function renderPolicyDetails(policy: Policy, deviceCount: number): void {
     JSON.stringify(policy.settings, null, 2)
       .split('\n')
       .map((l) => '    ' + l)
-      .join('\n')
+      .join('\n'),
   );
   console.log('');
 }

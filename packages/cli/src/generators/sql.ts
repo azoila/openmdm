@@ -5,10 +5,10 @@
  */
 
 import {
-  mdmSchema,
   type ColumnDefinition,
-  type TableDefinition,
   type IndexDefinition,
+  mdmSchema,
+  type TableDefinition,
 } from '@openmdm/core/schema';
 import type { DatabaseProvider } from './index.js';
 
@@ -46,7 +46,9 @@ function generatePostgresSchema(tablePrefix: string): string {
   for (const [name, values] of enums) {
     const enumName = applyPrefix(name, tablePrefix);
     lines.push(`DO $$ BEGIN`);
-    lines.push(`    CREATE TYPE "${enumName}" AS ENUM (${values.map((v) => `'${v}'`).join(', ')});`);
+    lines.push(
+      `    CREATE TYPE "${enumName}" AS ENUM (${values.map((v) => `'${v}'`).join(', ')});`,
+    );
     lines.push(`EXCEPTION`);
     lines.push(`    WHEN duplicate_object THEN null;`);
     lines.push(`END $$;`);
@@ -73,7 +75,7 @@ function generatePostgresSchema(tablePrefix: string): string {
 function generatePostgresTable(
   tableName: string,
   table: TableDefinition,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   const dbTableName = applyPrefix(tableName, tablePrefix);
   const columns: string[] = [];
@@ -87,7 +89,7 @@ function generatePostgresTable(
       const refTable = applyPrefix(col.references.table, tablePrefix);
       const onDelete = col.references.onDelete?.toUpperCase() || 'RESTRICT';
       constraints.push(
-        `    CONSTRAINT "fk_${dbTableName}_${colName}" FOREIGN KEY ("${colName}") REFERENCES "${refTable}"("${col.references.column}") ON DELETE ${onDelete.replace('_', ' ')}`
+        `    CONSTRAINT "fk_${dbTableName}_${colName}" FOREIGN KEY ("${colName}") REFERENCES "${refTable}"("${col.references.column}") ON DELETE ${onDelete.replace('_', ' ')}`,
       );
     }
   }
@@ -101,9 +103,7 @@ function generatePostgresTable(
     // Check for unique index that could be a composite PK
     const uniqueIdx = table.indexes?.find((idx) => idx.unique && idx.columns.length > 1);
     if (uniqueIdx) {
-      constraints.push(
-        `    PRIMARY KEY (${uniqueIdx.columns.map((c) => `"${c}"`).join(', ')})`
-      );
+      constraints.push(`    PRIMARY KEY (${uniqueIdx.columns.map((c) => `"${c}"`).join(', ')})`);
     }
   }
 
@@ -118,7 +118,7 @@ function generatePostgresColumn(
   colName: string,
   col: ColumnDefinition,
   tableName: string,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   let type = '';
 
@@ -178,7 +178,7 @@ function generatePostgresColumn(
 function generatePostgresIndex(
   tableName: string,
   idx: IndexDefinition,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   const dbTableName = applyPrefix(tableName, tablePrefix);
   const idxName = idx.name || `idx_${dbTableName}_${idx.columns.join('_')}`;
@@ -208,7 +208,7 @@ function generateMysqlSchema(tablePrefix: string): string {
 function generateMysqlTable(
   tableName: string,
   table: TableDefinition,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   const dbTableName = applyPrefix(tableName, tablePrefix);
   const columns: string[] = [];
@@ -223,7 +223,7 @@ function generateMysqlTable(
       const refTable = applyPrefix(col.references.table, tablePrefix);
       const onDelete = col.references.onDelete?.toUpperCase() || 'RESTRICT';
       constraints.push(
-        `    CONSTRAINT \`fk_${dbTableName}_${colName}\` FOREIGN KEY (\`${colName}\`) REFERENCES \`${refTable}\`(\`${col.references.column}\`) ON DELETE ${onDelete.replace('_', ' ')}`
+        `    CONSTRAINT \`fk_${dbTableName}_${colName}\` FOREIGN KEY (\`${colName}\`) REFERENCES \`${refTable}\`(\`${col.references.column}\`) ON DELETE ${onDelete.replace('_', ' ')}`,
       );
     }
   }
@@ -245,11 +245,7 @@ ${allParts.join(',\n')}
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`;
 }
 
-function generateMysqlColumn(
-  colName: string,
-  col: ColumnDefinition,
-  tableName: string
-): string {
+function generateMysqlColumn(colName: string, col: ColumnDefinition, tableName: string): string {
   let type = '';
 
   switch (col.type) {
@@ -333,7 +329,7 @@ function generateSqliteSchema(tablePrefix: string): string {
 function generateSqliteTable(
   tableName: string,
   table: TableDefinition,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   const dbTableName = applyPrefix(tableName, tablePrefix);
   const columns: string[] = [];
@@ -347,7 +343,7 @@ function generateSqliteTable(
       const refTable = applyPrefix(col.references.table, tablePrefix);
       const onDelete = col.references.onDelete?.toUpperCase() || 'RESTRICT';
       constraints.push(
-        `    FOREIGN KEY ("${colName}") REFERENCES "${refTable}"("${col.references.column}") ON DELETE ${onDelete.replace('_', ' ')}`
+        `    FOREIGN KEY ("${colName}") REFERENCES "${refTable}"("${col.references.column}") ON DELETE ${onDelete.replace('_', ' ')}`,
       );
     }
   }
@@ -357,9 +353,7 @@ function generateSqliteTable(
   if (uniqueIdx) {
     const hasSinglePk = Object.values(table.columns).some((c) => c.primaryKey);
     if (!hasSinglePk) {
-      constraints.push(
-        `    PRIMARY KEY (${uniqueIdx.columns.map((c) => `"${c}"`).join(', ')})`
-      );
+      constraints.push(`    PRIMARY KEY (${uniqueIdx.columns.map((c) => `"${c}"`).join(', ')})`);
     }
   }
 
@@ -418,11 +412,7 @@ function generateSqliteColumn(colName: string, col: ColumnDefinition): string {
   return def;
 }
 
-function generateSqliteIndex(
-  tableName: string,
-  idx: IndexDefinition,
-  tablePrefix: string
-): string {
+function generateSqliteIndex(tableName: string, idx: IndexDefinition, tablePrefix: string): string {
   const dbTableName = applyPrefix(tableName, tablePrefix);
   const idxName = idx.name || `idx_${dbTableName}_${idx.columns.join('_')}`;
   const cols = idx.columns.map((c) => `"${c}"`).join(', ');

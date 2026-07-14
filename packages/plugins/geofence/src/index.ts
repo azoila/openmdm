@@ -26,11 +26,11 @@
  */
 
 import type {
-  MDMPlugin,
-  MDMInstance,
   Device,
   DeviceLocation,
   Heartbeat,
+  MDMInstance,
+  MDMPlugin,
   PluginRoute,
 } from '@openmdm/core';
 
@@ -202,12 +202,7 @@ const EARTH_RADIUS_METERS = 6371000;
 /**
  * Calculate distance between two points using Haversine formula
  */
-function haversineDistance(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-): number {
+function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const toRad = (deg: number) => (deg * Math.PI) / 180;
 
   const dLat = toRad(lat2 - lat1);
@@ -215,10 +210,7 @@ function haversineDistance(
 
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) *
-      Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
 
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
@@ -231,13 +223,13 @@ function haversineDistance(
 function isInsideCircle(
   point: { latitude: number; longitude: number },
   center: { latitude: number; longitude: number },
-  radiusMeters: number
+  radiusMeters: number,
 ): boolean {
   const distance = haversineDistance(
     point.latitude,
     point.longitude,
     center.latitude,
-    center.longitude
+    center.longitude,
   );
   return distance <= radiusMeters;
 }
@@ -247,7 +239,7 @@ function isInsideCircle(
  */
 function isInsidePolygon(
   point: { latitude: number; longitude: number },
-  vertices: Array<{ latitude: number; longitude: number }>
+  vertices: Array<{ latitude: number; longitude: number }>,
 ): boolean {
   if (vertices.length < 3) return false;
 
@@ -370,10 +362,7 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
   /**
    * Check if location is inside zone
    */
-  function isInsideZone(
-    location: DeviceLocation,
-    zone: GeofenceZone
-  ): boolean {
+  function isInsideZone(location: DeviceLocation, zone: GeofenceZone): boolean {
     if (!zone.enabled) return false;
     if (!isZoneScheduleActive(zone.schedule)) return false;
 
@@ -391,10 +380,7 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
   /**
    * Process location update for a device
    */
-  async function processLocation(
-    device: Device,
-    location: DeviceLocation
-  ): Promise<void> {
+  async function processLocation(device: Device, location: DeviceLocation): Promise<void> {
     if (!deviceZoneStates.has(device.id)) {
       deviceZoneStates.set(device.id, new Map());
     }
@@ -442,9 +428,7 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
           inside: false,
           enteredAt: state?.enteredAt,
           exitedAt: new Date(),
-          dwellTime: state?.enteredAt
-            ? Date.now() - state.enteredAt.getTime()
-            : undefined,
+          dwellTime: state?.enteredAt ? Date.now() - state.enteredAt.getTime() : undefined,
         });
 
         await triggerExit(device, zone);
@@ -534,14 +518,12 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
         (z) =>
           z.id !== zone.id &&
           z.policyOverride === zone.policyOverride &&
-          deviceZoneStates.get(device.id)?.get(z.id)?.inside
+          deviceZoneStates.get(device.id)?.get(z.id)?.inside,
       );
 
       if (!stillInOverrideZone) {
         // Revert to previous policy (would need to track original policy)
-        console.log(
-          `[OpenMDM Geofence] Policy override ended for device ${device.id}`
-        );
+        console.log(`[OpenMDM Geofence] Policy override ended for device ${device.id}`);
       }
     }
   }
@@ -553,7 +535,7 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
     device: Device,
     action: GeofenceAction,
     zone: GeofenceZone,
-    trigger: 'enter' | 'exit'
+    trigger: 'enter' | 'exit',
   ): Promise<void> {
     switch (action.type) {
       case 'notify':
@@ -609,10 +591,7 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
               }),
             });
           } catch (error) {
-            console.error(
-              `[OpenMDM Geofence] Webhook failed for zone ${zone.id}:`,
-              error
-            );
+            console.error(`[OpenMDM Geofence] Webhook failed for zone ${zone.id}:`, error);
           }
         }
         break;
@@ -671,17 +650,11 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
         // Validate
         if (body.type === 'circle') {
           if (!body.center || !body.radius) {
-            return context.json(
-              { error: 'Circle zone requires center and radius' },
-              400
-            );
+            return context.json({ error: 'Circle zone requires center and radius' }, 400);
           }
         } else if (body.type === 'polygon') {
           if (!body.vertices || body.vertices.length < 3) {
-            return context.json(
-              { error: 'Polygon zone requires at least 3 vertices' },
-              400
-            );
+            return context.json({ error: 'Polygon zone requires at least 3 vertices' }, 400);
           }
         }
 
@@ -711,7 +684,7 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
             createdAt: zone.createdAt.toISOString(),
             updatedAt: zone.updatedAt.toISOString(),
           },
-          201
+          201,
         );
       },
     },
@@ -901,11 +874,5 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
 // Exports
 // ============================================
 
-export {
-  haversineDistance,
-  isInsideCircle,
-  isInsidePolygon,
-  isZoneScheduleActive,
-};
-
 export type { MDMPlugin };
+export { haversineDistance, isInsideCircle, isInsidePolygon, isZoneScheduleActive };

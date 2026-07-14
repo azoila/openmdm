@@ -1,7 +1,7 @@
 {
   "name": "@openmdm/drizzle-adapter",
   "version": "0.5.0",
-  "description": "Drizzle ORM adapter for OpenMDM",
+  "description": "Drizzle ORM adapter for OpenMDM (PostgreSQL)",
   "author": "OpenMDM Contributors",
   "type": "module",
   "sideEffects": false,
@@ -20,14 +20,6 @@
     "./postgres": {
       "types": "./dist/postgres.d.ts",
       "import": "./dist/postgres.js"
-    },
-    "./mysql": {
-      "types": "./dist/mysql.d.ts",
-      "import": "./dist/mysql.js"
-    },
-    "./sqlite": {
-      "types": "./dist/sqlite.d.ts",
-      "import": "./dist/sqlite.js"
     }
   },
   "files": [
@@ -38,7 +30,9 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write ."
   },
   "dependencies": {
     "@openmdm/core": "workspace:*",

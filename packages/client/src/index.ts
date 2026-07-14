@@ -40,7 +40,13 @@
 // ============================================
 
 export type DeviceStatus = 'pending' | 'enrolled' | 'unenrolled' | 'blocked';
-export type CommandStatus = 'pending' | 'sent' | 'acknowledged' | 'completed' | 'failed' | 'cancelled';
+export type CommandStatus =
+  | 'pending'
+  | 'sent'
+  | 'acknowledged'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 export type EnrollmentMethod = 'qr' | 'nfc' | 'zero-touch' | 'knox' | 'manual' | 'app-only' | 'adb';
 export type HardwareControl = 'on' | 'off' | 'user';
 export type SystemUpdatePolicy = 'auto' | 'windowed' | 'postpone' | 'manual';
@@ -325,7 +331,7 @@ export class MDMClientError extends Error {
     message: string,
     public code: string,
     public statusCode: number = 500,
-    public details?: unknown
+    public details?: unknown,
   ) {
     super(message);
     this.name = 'MDMClientError';
@@ -374,7 +380,7 @@ async function generateHMAC(message: string, secret: string): Promise<string> {
     keyData,
     { name: 'HMAC', hash: 'SHA-256' },
     false,
-    ['sign']
+    ['sign'],
   );
 
   const signature = await crypto.subtle.sign('HMAC', key, messageData);
@@ -388,7 +394,7 @@ async function generateHMAC(message: string, secret: string): Promise<string> {
 export async function generateEnrollmentSignature(
   request: EnrollmentRequest,
   timestamp: string,
-  secret: string
+  secret: string,
 ): Promise<string> {
   const message = [
     request.model,
@@ -468,11 +474,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
   /**
    * Make authenticated request to server
    */
-  async function request<T>(
-    path: string,
-    options: RequestInit = {},
-    retry = 0
-  ): Promise<T> {
+  async function request<T>(path: string, options: RequestInit = {}, retry = 0): Promise<T> {
     const url = `${config.serverUrl}${path}`;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -520,7 +522,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
         throw new ServerError(
           errorData.message || `Server error: ${response.status}`,
           response.status,
-          errorData
+          errorData,
         );
       }
 
@@ -540,7 +542,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
 
       // Network error - retry with backoff
       if (retry < maxRetries) {
-        const delay = retryDelay * Math.pow(backoffMultiplier, retry);
+        const delay = retryDelay * backoffMultiplier ** retry;
         await new Promise((resolve) => setTimeout(resolve, delay));
         return request<T>(path, options, retry + 1);
       }
@@ -593,7 +595,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
       const signature = await generateEnrollmentSignature(
         enrollRequest,
         timestamp,
-        config.deviceSecret
+        config.deviceSecret,
       );
 
       const response = await request<EnrollmentResponse>('/agent/enroll', {
@@ -611,9 +613,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
         enrollmentId: response.enrollmentId,
         token: response.token,
         refreshToken: response.refreshToken,
-        tokenExpiresAt: response.tokenExpiresAt
-          ? new Date(response.tokenExpiresAt)
-          : undefined,
+        tokenExpiresAt: response.tokenExpiresAt ? new Date(response.tokenExpiresAt) : undefined,
         policyVersion: response.policy?.version,
         lastSync: new Date(),
       };
@@ -659,9 +659,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
         throw new EnrollmentRequiredError();
       }
 
-      const response = await request<{ commands: Command[] }>(
-        '/agent/commands/pending'
-      );
+      const response = await request<{ commands: Command[] }>('/agent/commands/pending');
       return response.commands;
     },
 
@@ -675,10 +673,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
       });
     },
 
-    async completeCommand(
-      commandId: string,
-      result: CommandResult
-    ): Promise<void> {
+    async completeCommand(commandId: string, result: CommandResult): Promise<void> {
       if (!this.isEnrolled()) {
         throw new EnrollmentRequiredError();
       }
@@ -700,10 +695,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
       });
     },
 
-    async registerPushToken(
-      provider: 'fcm' | 'mqtt',
-      token: string
-    ): Promise<void> {
+    async registerPushToken(provider: 'fcm' | 'mqtt', token: string): Promise<void> {
       if (!this.isEnrolled()) {
         throw new EnrollmentRequiredError();
       }
@@ -725,10 +717,7 @@ export function createMDMClient(config: MDMClientConfig): MDMClient {
       });
     },
 
-    async reportEvent(
-      type: string,
-      payload?: Record<string, unknown>
-    ): Promise<void> {
+    async reportEvent(type: string, payload?: Record<string, unknown>): Promise<void> {
       if (!this.isEnrolled()) {
         throw new EnrollmentRequiredError();
       }
@@ -863,7 +852,7 @@ export interface HeartbeatScheduler {
  */
 export function createHeartbeatScheduler(
   client: MDMClient,
-  config: HeartbeatSchedulerConfig
+  config: HeartbeatSchedulerConfig,
 ): HeartbeatScheduler {
   let interval = config.interval ?? 60000;
   let timerId: ReturnType<typeof setInterval> | null = null;
@@ -952,9 +941,7 @@ export function deserializeState(data: string): MDMClientState {
   const parsed = JSON.parse(data);
   return {
     ...parsed,
-    tokenExpiresAt: parsed.tokenExpiresAt
-      ? new Date(parsed.tokenExpiresAt)
-      : undefined,
+    tokenExpiresAt: parsed.tokenExpiresAt ? new Date(parsed.tokenExpiresAt) : undefined,
     lastSync: parsed.lastSync ? new Date(parsed.lastSync) : undefined,
   };
 }

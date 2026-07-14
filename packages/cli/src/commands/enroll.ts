@@ -1,7 +1,7 @@
 import chalk from 'chalk';
+import fs from 'fs/promises';
 import ora from 'ora';
 import QRCode from 'qrcode';
-import fs from 'fs/promises';
 
 interface QROptions {
   policy?: string;
@@ -22,8 +22,8 @@ export async function generateQR(options: QROptions): Promise<void> {
     chalk.yellow(
       '⚠  This command currently generates an unsigned, non-persisted enrollment payload.\\n' +
         '   HMAC-signed and server-persisted enrollment tokens will land in Phase 2b\\n' +
-        '   (hardware-rooted identity). For now, use this only for development/testing.\\n'
-    )
+        '   (hardware-rooted identity). For now, use this only for development/testing.\\n',
+    ),
   );
 
   const serverUrl = process.env.SERVER_URL || 'https://mdm.example.com';
@@ -105,8 +105,8 @@ export async function generateToken(options: TokenOptions): Promise<void> {
   console.log(
     chalk.yellow(
       '⚠  This command currently generates an unsigned, non-persisted token.\\n' +
-        '   HMAC-signed and server-persisted tokens will land in Phase 2b.\\n'
-    )
+        '   HMAC-signed and server-persisted tokens will land in Phase 2b.\\n',
+    ),
   );
 
   const serverUrl = process.env.SERVER_URL || 'https://mdm.example.com';
@@ -132,7 +132,9 @@ export async function generateToken(options: TokenOptions): Promise<void> {
 
   console.log('\\n' + chalk.gray('Android Intent URL:'));
   console.log(
-    chalk.cyan(`intent://enroll?token=${token}#Intent;scheme=openmdm;package=com.openmdm.agent;end`)
+    chalk.cyan(
+      `intent://enroll?token=${token}#Intent;scheme=openmdm;package=com.openmdm.agent;end`,
+    ),
   );
   console.log('');
 }

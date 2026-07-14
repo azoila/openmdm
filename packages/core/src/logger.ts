@@ -7,16 +7,17 @@
  * for the zero-config path.
  */
 
-import type { Logger, LogContext } from './types';
+import type { LogContext, Logger } from './types';
 
 /**
  * Resolve (context, message) or (message) argument forms into a
  * single shape. Matches the pino call convention used by the Logger
  * interface.
  */
-function normalize(
-  ...args: [LogContext, string] | [string]
-): { context: LogContext | undefined; message: string } {
+function normalize(...args: [LogContext, string] | [string]): {
+  context: LogContext | undefined;
+  message: string;
+} {
   if (args.length === 1) {
     return { context: undefined, message: args[0] };
   }
@@ -75,8 +76,7 @@ export function createConsoleLogger(scope: string[] = []): Logger {
       // meaningful and just returns a new logger with the same
       // scope. Real loggers (pino) properly attach bindings to every
       // subsequent call — we do the simplest thing that won't lie.
-      const componentPart =
-        typeof bindings.component === 'string' ? [bindings.component] : [];
+      const componentPart = typeof bindings.component === 'string' ? [bindings.component] : [];
       return createConsoleLogger([...scope, ...componentPart]);
     },
   };

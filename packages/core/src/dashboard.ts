@@ -6,14 +6,14 @@
  */
 
 import type {
+  AppInstallationSummary,
+  CommandSuccessRates,
   DashboardManager,
   DashboardStats,
-  DeviceStatusBreakdown,
-  EnrollmentTrendPoint,
-  CommandSuccessRates,
-  AppInstallationSummary,
   DatabaseAdapter,
   DeviceStatus,
+  DeviceStatusBreakdown,
+  EnrollmentTrendPoint,
 } from './types';
 
 /**
@@ -29,10 +29,7 @@ import type {
  * a real `tenantId` column. Once that lands, this guard becomes
  * redundant — the fallback paths will be able to filter themselves.
  */
-function assertNoTenantScopeRequested(
-  tenantId: string | undefined,
-  method: string,
-): void {
+function assertNoTenantScopeRequested(tenantId: string | undefined, method: string): void {
   if (tenantId) {
     throw new Error(
       `DashboardManager.${method} was called with a tenantId but the ` +
@@ -90,9 +87,7 @@ export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
       const allCommands = await db.listCommands({ limit: 10000 });
 
       const pendingCommands = allCommands.filter((c) => c.status === 'pending');
-      const last24hCommands = allCommands.filter(
-        (c) => new Date(c.createdAt) >= yesterday
-      );
+      const last24hCommands = allCommands.filter((c) => new Date(c.createdAt) >= yesterday);
 
       const commandStats = {
         pendingCount: pendingCommands.length,
@@ -287,17 +282,14 @@ export function createDashboardManager(db: DatabaseAdapter): DashboardManager {
       }
 
       // Last 24h
-      const last24hCommands = commands.filter(
-        (c) => new Date(c.createdAt) >= yesterday
-      );
+      const last24hCommands = commands.filter((c) => new Date(c.createdAt) >= yesterday);
 
       return {
         overall: {
           total,
           completed,
           failed,
-          successRate:
-            completed + failed > 0 ? (completed / (completed + failed)) * 100 : 0,
+          successRate: completed + failed > 0 ? (completed / (completed + failed)) * 100 : 0,
         },
         byType,
         last24h: {

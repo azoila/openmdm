@@ -5,7 +5,7 @@
  * Supports both database-backed and in-memory storage.
  */
 
-import type { PluginStorageAdapter, DatabaseAdapter } from './types';
+import type { DatabaseAdapter, PluginStorageAdapter } from './types';
 
 /**
  * Create a PluginStorageAdapter backed by the database

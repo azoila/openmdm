@@ -1,6 +1,6 @@
+import type { MDMInstance } from '@openmdm/core';
 import chalk from 'chalk';
 import ora from 'ora';
-import type { MDMInstance } from '@openmdm/core';
 import { withMDM } from '../config.js';
 
 interface StatsOptions {
@@ -52,9 +52,7 @@ export const showStats = withMDM(async (mdm: MDMInstance, options: StatsOptions)
   console.log(`  Total:       ${chalk.cyan(commandRates.overall.total)}`);
   console.log(`  Completed:   ${chalk.green(commandRates.overall.completed)}`);
   console.log(`  Failed:      ${chalk.red(commandRates.overall.failed)}`);
-  console.log(
-    `  Success:     ${chalk.cyan(commandRates.overall.successRate.toFixed(1) + '%')}`
-  );
+  console.log(`  Success:     ${chalk.cyan(commandRates.overall.successRate.toFixed(1) + '%')}`);
   console.log('');
 
   console.log(chalk.white.bold('  Commands (last 24h)'));

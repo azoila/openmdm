@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createMDM, CommandNotFoundError } from '../src/index';
-import type { DatabaseAdapter, PushAdapter, Device, Policy, Command } from '../src/types';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { CommandNotFoundError, createMDM } from '../src/index';
+import type { Command, DatabaseAdapter, Device, Policy, PushAdapter } from '../src/types';
 
 // Mock Database Adapter
 function createMockDatabaseAdapter(): DatabaseAdapter {
@@ -15,7 +15,7 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
       return devices.get(id) || null;
     },
     async findDeviceByEnrollmentId(enrollmentId: string) {
-      return Array.from(devices.values()).find(d => d.enrollmentId === enrollmentId) || null;
+      return Array.from(devices.values()).find((d) => d.enrollmentId === enrollmentId) || null;
     },
     async listDevices() {
       return {
@@ -60,7 +60,7 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
       return policies.get(id) || null;
     },
     async findDefaultPolicy() {
-      return Array.from(policies.values()).find(p => p.isDefault) || null;
+      return Array.from(policies.values()).find((p) => p.isDefault) || null;
     },
     async listPolicies() {
       return Array.from(policies.values());
@@ -90,11 +90,27 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
     },
 
     // Applications
-    async findApplication() { return null; },
-    async findApplicationByPackage() { return null; },
-    async listApplications() { return []; },
-    async createApplication(data) { return { ...data, id: 'app_1', isActive: true, createdAt: new Date(), updatedAt: new Date() } as any; },
-    async updateApplication() { return {} as any; },
+    async findApplication() {
+      return null;
+    },
+    async findApplicationByPackage() {
+      return null;
+    },
+    async listApplications() {
+      return [];
+    },
+    async createApplication(data) {
+      return {
+        ...data,
+        id: 'app_1',
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as any;
+    },
+    async updateApplication() {
+      return {} as any;
+    },
     async deleteApplication() {},
 
     // Commands
@@ -126,7 +142,7 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
     async getPendingCommands(deviceId: string) {
       // Include 'pending' and 'sent' - both are awaiting device acknowledgment
       return Array.from(commands.values()).filter(
-        c => c.deviceId === deviceId && (c.status === 'pending' || c.status === 'sent')
+        (c) => c.deviceId === deviceId && (c.status === 'pending' || c.status === 'sent'),
       );
     },
 
@@ -134,22 +150,46 @@ function createMockDatabaseAdapter(): DatabaseAdapter {
     async createEvent(event) {
       return { ...event, id: `event_${Date.now()}`, createdAt: new Date() } as any;
     },
-    async listEvents() { return []; },
+    async listEvents() {
+      return [];
+    },
 
     // Groups
-    async findGroup() { return null; },
-    async listGroups() { return []; },
-    async createGroup(data) { return { ...data, id: 'group_1', createdAt: new Date(), updatedAt: new Date() } as any; },
-    async updateGroup() { return {} as any; },
+    async findGroup() {
+      return null;
+    },
+    async listGroups() {
+      return [];
+    },
+    async createGroup(data) {
+      return { ...data, id: 'group_1', createdAt: new Date(), updatedAt: new Date() } as any;
+    },
+    async updateGroup() {
+      return {} as any;
+    },
     async deleteGroup() {},
-    async listDevicesInGroup() { return []; },
+    async listDevicesInGroup() {
+      return [];
+    },
     async addDeviceToGroup() {},
     async removeDeviceFromGroup() {},
-    async getDeviceGroups() { return []; },
+    async getDeviceGroups() {
+      return [];
+    },
 
     // Push Tokens
-    async findPushToken() { return null; },
-    async upsertPushToken(data) { return { ...data, id: 'pt_1', isActive: true, createdAt: new Date(), updatedAt: new Date() } as any; },
+    async findPushToken() {
+      return null;
+    },
+    async upsertPushToken(data) {
+      return {
+        ...data,
+        id: 'pt_1',
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as any;
+    },
     async deletePushToken() {},
   };
 }
@@ -164,7 +204,7 @@ function createMockPushAdapter(): PushAdapter {
       return {
         successCount: deviceIds.length,
         failureCount: 0,
-        results: deviceIds.map(id => ({
+        results: deviceIds.map((id) => ({
           deviceId: id,
           result: { success: true, messageId: `msg_${Date.now()}` },
         })),
@@ -242,8 +282,18 @@ describe('createMDM', () => {
     });
 
     it('should list devices', async () => {
-      await mdm.devices.create({ enrollmentId: 'list-1', model: 'A', manufacturer: 'X', osVersion: '1' });
-      await mdm.devices.create({ enrollmentId: 'list-2', model: 'B', manufacturer: 'Y', osVersion: '2' });
+      await mdm.devices.create({
+        enrollmentId: 'list-1',
+        model: 'A',
+        manufacturer: 'X',
+        osVersion: '1',
+      });
+      await mdm.devices.create({
+        enrollmentId: 'list-2',
+        model: 'B',
+        manufacturer: 'Y',
+        osVersion: '2',
+      });
 
       const result = await mdm.devices.list();
       expect(result.devices.length).toBe(2);
@@ -399,27 +449,27 @@ describe('createMDM', () => {
     });
 
     it('should throw CommandNotFoundError when acknowledging a deleted command', async () => {
-      await expect(
-        mdm.commands.acknowledge('nonexistent-command-id')
-      ).rejects.toThrow(CommandNotFoundError);
+      await expect(mdm.commands.acknowledge('nonexistent-command-id')).rejects.toThrow(
+        CommandNotFoundError,
+      );
     });
 
     it('should throw CommandNotFoundError when completing a deleted command', async () => {
       await expect(
-        mdm.commands.complete('nonexistent-command-id', { success: true })
+        mdm.commands.complete('nonexistent-command-id', { success: true }),
       ).rejects.toThrow(CommandNotFoundError);
     });
 
     it('should throw CommandNotFoundError when failing a deleted command', async () => {
-      await expect(
-        mdm.commands.fail('nonexistent-command-id', 'some error')
-      ).rejects.toThrow(CommandNotFoundError);
+      await expect(mdm.commands.fail('nonexistent-command-id', 'some error')).rejects.toThrow(
+        CommandNotFoundError,
+      );
     });
 
     it('should throw CommandNotFoundError when cancelling a deleted command', async () => {
-      await expect(
-        mdm.commands.cancel('nonexistent-command-id')
-      ).rejects.toThrow(CommandNotFoundError);
+      await expect(mdm.commands.cancel('nonexistent-command-id')).rejects.toThrow(
+        CommandNotFoundError,
+      );
     });
   });
 
@@ -504,7 +554,7 @@ describe('Enrollment', () => {
         method: 'app-only',
         timestamp: new Date().toISOString(),
         signature: 'invalid-signature',
-      })
+      }),
     ).rejects.toThrow();
   });
 });

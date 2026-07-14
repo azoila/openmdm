@@ -5,10 +5,10 @@
  */
 
 import {
-  mdmSchema,
   type ColumnDefinition,
-  type TableDefinition,
   type IndexDefinition,
+  mdmSchema,
+  type TableDefinition,
 } from '@openmdm/core/schema';
 import type { DatabaseProvider } from './index.js';
 
@@ -140,18 +140,18 @@ function generateEnums(provider: DatabaseProvider, tablePrefix: string): string 
     switch (provider) {
       case 'pg':
         enumDefs.push(
-          `export const ${enumVarName} = pgEnum('${enumDbName}', [${values.map((v) => `'${v}'`).join(', ')}]);`
+          `export const ${enumVarName} = pgEnum('${enumDbName}', [${values.map((v) => `'${v}'`).join(', ')}]);`,
         );
         break;
       case 'mysql':
         enumDefs.push(
-          `export const ${enumVarName} = mysqlEnum('${enumDbName}', [${values.map((v) => `'${v}'`).join(', ')}]);`
+          `export const ${enumVarName} = mysqlEnum('${enumDbName}', [${values.map((v) => `'${v}'`).join(', ')}]);`,
         );
         break;
       case 'sqlite':
         // SQLite doesn't have native enums, we use text with CHECK constraint
         enumDefs.push(
-          `// SQLite enum values for ${enumVarName}: ${values.map((v) => `'${v}'`).join(', ')}`
+          `// SQLite enum values for ${enumVarName}: ${values.map((v) => `'${v}'`).join(', ')}`,
         );
         break;
     }
@@ -182,7 +182,7 @@ function generateTable(
   tableName: string,
   table: TableDefinition,
   provider: DatabaseProvider,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   const varName = toCamelCase(applyPrefix(tableName, tablePrefix));
   const dbTableName = applyPrefix(tableName, tablePrefix);
@@ -192,9 +192,7 @@ function generateTable(
     .map(([colName, col]) => generateColumn(colName, col, tableName, provider, tablePrefix))
     .join(',\n    ');
 
-  const indexes = table.indexes
-    ? generateIndexes(table.indexes, varName, provider)
-    : '';
+  const indexes = table.indexes ? generateIndexes(table.indexes, varName, provider) : '';
 
   return `export const ${varName} = ${tableFunc}(
   '${dbTableName}',
@@ -209,7 +207,7 @@ function generateColumn(
   col: ColumnDefinition,
   tableName: string,
   provider: DatabaseProvider,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   const camelColName = toCamelCase(colName);
   let colDef = '';
@@ -233,7 +231,7 @@ function generatePgColumn(
   colName: string,
   col: ColumnDefinition,
   tableName: string,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   let def = '';
 
@@ -259,10 +257,11 @@ function generatePgColumn(
     case 'json':
       def = `json('${colName}')`;
       break;
-    case 'enum':
+    case 'enum': {
       const enumVarName = toCamelCase(applyPrefix(`${tableName}_${colName}`, tablePrefix)) + 'Enum';
       def = `${enumVarName}('${colName}')`;
       break;
+    }
   }
 
   // Add constraints
@@ -301,7 +300,7 @@ function generateMysqlColumn(
   colName: string,
   col: ColumnDefinition,
   tableName: string,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   let def = '';
 
@@ -327,10 +326,11 @@ function generateMysqlColumn(
     case 'json':
       def = `json('${colName}')`;
       break;
-    case 'enum':
+    case 'enum': {
       const enumVarName = toCamelCase(applyPrefix(`${tableName}_${colName}`, tablePrefix)) + 'Enum';
       def = `${enumVarName}('${colName}')`;
       break;
+    }
   }
 
   // Add constraints
@@ -369,7 +369,7 @@ function generateSqliteColumn(
   colName: string,
   col: ColumnDefinition,
   tableName: string,
-  tablePrefix: string
+  tablePrefix: string,
 ): string {
   let def = '';
 
@@ -429,7 +429,7 @@ function generateSqliteColumn(
 function generateIndexes(
   indexes: IndexDefinition[],
   tableVarName: string,
-  provider: DatabaseProvider
+  provider: DatabaseProvider,
 ): string {
   return indexes
     .map((idx) => {
@@ -492,7 +492,7 @@ function generateRelations(tablePrefix: string): string {
         `  ${toCamelCase(relationName)}: one(${refTableVar}, {
     fields: [${varName}.${colVar}],
     references: [${refTableVar}.${refColVar}],
-  })`
+  })`,
       );
     }
 
@@ -508,7 +508,7 @@ function generateRelations(tablePrefix: string): string {
       relations.push(
         `export const ${varName}Relations = relations(${varName}, ({ one, many }) => ({
 ${relationParts.join(',\n')}
-}));`
+}));`,
       );
     }
   }

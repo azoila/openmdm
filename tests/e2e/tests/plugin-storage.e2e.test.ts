@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 // Import from source so the suite runs without a prior `pnpm build`.
 // Every other test file in this repo does the same — it matches the
 // monorepo's "tests live next to the source, not the dist" convention.
@@ -32,11 +32,7 @@ import { connect, resetPluginStorage, type TestDB } from '../src/db';
 type AdapterWithPluginStorage = Required<
   Pick<
     DatabaseAdapter,
-    | 'getPluginValue'
-    | 'setPluginValue'
-    | 'deletePluginValue'
-    | 'listPluginKeys'
-    | 'clearPluginData'
+    'getPluginValue' | 'setPluginValue' | 'deletePluginValue' | 'listPluginKeys' | 'clearPluginData'
   >
 >;
 
@@ -147,9 +143,7 @@ describe('drizzleAdapter plugin-storage (e2e, real Postgres)', () => {
   });
 
   it('deletePluginValue on a missing key is a no-op', async () => {
-    await expect(
-      adapter.deletePluginValue('kiosk', 'never-existed'),
-    ).resolves.not.toThrow();
+    await expect(adapter.deletePluginValue('kiosk', 'never-existed')).resolves.not.toThrow();
   });
 
   it('listPluginKeys returns every key under a plugin namespace', async () => {

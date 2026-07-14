@@ -6,15 +6,15 @@
  */
 
 import type {
-  AuditLog,
   AuditAction,
+  AuditConfig,
+  AuditLog,
+  AuditLogFilter,
+  AuditLogListResult,
   AuditManager,
   AuditSummary,
   CreateAuditLogInput,
-  AuditLogFilter,
-  AuditLogListResult,
   DatabaseAdapter,
-  AuditConfig,
 } from './types';
 
 /**
@@ -52,10 +52,7 @@ const CSV_HEADER =
 /**
  * Create an AuditManager instance
  */
-export function createAuditManager(
-  db: DatabaseAdapter,
-  config?: AuditConfig
-): AuditManager {
+export function createAuditManager(db: DatabaseAdapter, config?: AuditConfig): AuditManager {
   const retentionDays = config?.retentionDays ?? DEFAULT_RETENTION_DAYS;
 
   /**
@@ -128,7 +125,7 @@ export function createAuditManager(
 
     async getByUser(
       userId: string,
-      filter?: Omit<AuditLogFilter, 'userId'>
+      filter?: Omit<AuditLogFilter, 'userId'>,
     ): Promise<AuditLogListResult> {
       if (!db.listAuditLogs) {
         throw new Error('Database adapter does not support audit operations');
@@ -265,7 +262,7 @@ export function createAuditEntry(
     userAgent?: string;
     status?: 'success' | 'failure';
     error?: string;
-  } = {}
+  } = {},
 ): CreateAuditLogInput {
   return {
     action,
@@ -288,7 +285,7 @@ export function withAudit<T extends (...args: unknown[]) => Promise<unknown>>(
   manager: AuditManager,
   action: AuditAction,
   resource: string,
-  getContext: (...args: Parameters<T>) => Partial<CreateAuditLogInput>
+  getContext: (...args: Parameters<T>) => Partial<CreateAuditLogInput>,
 ) {
   return function decorator(target: T): T {
     return (async (...args: Parameters<T>) => {

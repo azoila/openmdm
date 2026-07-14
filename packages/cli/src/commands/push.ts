@@ -1,6 +1,6 @@
+import type { MDMInstance } from '@openmdm/core';
 import chalk from 'chalk';
 import ora from 'ora';
-import type { MDMInstance } from '@openmdm/core';
 import { withMDM } from '../config.js';
 
 interface PushOptions {
@@ -43,5 +43,5 @@ export const testPush = withMDM(
       }
       process.exitCode = 1;
     }
-  }
+  },
 );

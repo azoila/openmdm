@@ -1,7 +1,7 @@
+import type { Device, DeviceFilter, DeviceStatus, MDMInstance } from '@openmdm/core';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import ora from 'ora';
-import type { Device, DeviceFilter, DeviceStatus, MDMInstance } from '@openmdm/core';
 import { withMDM } from '../config.js';
 
 interface ListOptions {
@@ -44,7 +44,7 @@ export const listDevices = withMDM(async (mdm: MDMInstance, options: ListOptions
   if (options.status) {
     if (!isDeviceStatus(options.status)) {
       throw new Error(
-        `Invalid status "${options.status}". Valid values: ${VALID_STATUSES.join(', ')}`
+        `Invalid status "${options.status}". Valid values: ${VALID_STATUSES.join(', ')}`,
       );
     }
     filter.status = options.status;
@@ -74,8 +74,8 @@ export const listDevices = withMDM(async (mdm: MDMInstance, options: ListOptions
 
   console.log(
     chalk.gray(
-      `${'ID'.padEnd(20)} ${'Model'.padEnd(22)} ${'Status'.padEnd(12)} ${'OS'.padEnd(8)} ${'Battery'.padEnd(8)} ${'Last Seen'.padEnd(14)}`
-    )
+      `${'ID'.padEnd(20)} ${'Model'.padEnd(22)} ${'Status'.padEnd(12)} ${'OS'.padEnd(8)} ${'Battery'.padEnd(8)} ${'Last Seen'.padEnd(14)}`,
+    ),
   );
   console.log(chalk.gray('-'.repeat(90)));
 
@@ -84,8 +84,8 @@ export const listDevices = withMDM(async (mdm: MDMInstance, options: ListOptions
       device.status === 'enrolled'
         ? chalk.green
         : device.status === 'pending'
-        ? chalk.yellow
-        : chalk.red;
+          ? chalk.yellow
+          : chalk.red;
 
     const lastSeen = device.lastHeartbeat ? formatRelativeTime(device.lastHeartbeat) : 'Never';
     const battery = device.batteryLevel != null ? `${device.batteryLevel}%` : '-';
@@ -94,8 +94,8 @@ export const listDevices = withMDM(async (mdm: MDMInstance, options: ListOptions
 
     console.log(
       `${truncate(device.id, 20).padEnd(20)} ${truncate(model, 22).padEnd(22)} ${statusColor(
-        device.status.padEnd(12)
-      )} ${os.padEnd(8)} ${battery.padEnd(8)} ${lastSeen.padEnd(14)}`
+        device.status.padEnd(12),
+      )} ${os.padEnd(8)} ${battery.padEnd(8)} ${lastSeen.padEnd(14)}`,
     );
   }
 
@@ -120,7 +120,7 @@ export const showDevice = withMDM(
     }
 
     renderDeviceDetails(device);
-  }
+  },
 );
 
 export const syncDevice = withMDM(async (mdm: MDMInstance, deviceId: string) => {
@@ -138,7 +138,7 @@ export const lockDevice = withMDM(
     if (options.message) {
       console.log(chalk.gray(`Lock screen message: "${options.message}"`));
     }
-  }
+  },
 );
 
 export const wipeDevice = withMDM(
@@ -170,7 +170,7 @@ export const wipeDevice = withMDM(
       console.log(chalk.gray('SD card data will be preserved.'));
     }
     console.log(chalk.yellow('\nThe device will be wiped on its next connection.'));
-  }
+  },
 );
 
 export const removeDevice = withMDM(
@@ -194,7 +194,7 @@ export const removeDevice = withMDM(
     const spinner = ora(`Removing device ${deviceId}...`).start();
     await mdm.devices.delete(deviceId);
     spinner.succeed(`Device ${deviceId} removed from MDM`);
-  }
+  },
 );
 
 function renderDeviceDetails(device: Device): void {
@@ -209,9 +209,7 @@ function renderDeviceDetails(device: Device): void {
   console.log('');
   row(
     'Status',
-    device.status === 'enrolled'
-      ? chalk.green(device.status)
-      : chalk.yellow(device.status)
+    device.status === 'enrolled' ? chalk.green(device.status) : chalk.yellow(device.status),
   );
   row('Policy ID', device.policyId ?? '-');
   row('Battery', device.batteryLevel != null ? `${device.batteryLevel}%` : '-');
@@ -219,7 +217,7 @@ function renderDeviceDetails(device: Device): void {
     'Storage',
     device.storageUsed != null && device.storageTotal != null
       ? `${formatBytes(device.storageUsed)} / ${formatBytes(device.storageTotal)}`
-      : '-'
+      : '-',
   );
   row('Last Heartbeat', device.lastHeartbeat ? formatRelativeTime(device.lastHeartbeat) : 'Never');
   row('Last Sync', device.lastSync ? formatRelativeTime(device.lastSync) : 'Never');

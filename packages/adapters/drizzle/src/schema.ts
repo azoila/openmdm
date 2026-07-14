@@ -4,11 +4,13 @@
  * This file exports the schema definition for use with schema generators.
  * For ready-to-use Drizzle tables, import from:
  * - @openmdm/drizzle-adapter/postgres
- * - @openmdm/drizzle-adapter/mysql
- * - @openmdm/drizzle-adapter/sqlite
+ *
+ * MySQL and SQLite runtime schemas are not implemented yet — the adapter currently
+ * supports PostgreSQL only. Use `openmdm generate --dialect mysql|sqlite` to scaffold
+ * a schema, or contribute the runtime support.
  */
 
-export { mdmSchema, getTableNames, getColumnNames } from '@openmdm/core/schema';
+export { getColumnNames, getTableNames, mdmSchema } from '@openmdm/core/schema';
 
 /**
  * Table prefix for MDM tables.

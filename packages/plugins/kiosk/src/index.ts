@@ -22,15 +22,15 @@
  */
 
 import type {
-  MDMPlugin,
-  MDMInstance,
-  Device,
-  Policy,
-  PolicySettings,
   Command,
   CommandResult,
+  Device,
   Heartbeat,
+  MDMInstance,
+  MDMPlugin,
   PluginRoute,
+  Policy,
+  PolicySettings,
 } from '@openmdm/core';
 
 // ============================================
@@ -222,9 +222,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
       activeApp: v.activeApp as string | undefined,
       lockedSince: v.lockedSince ? new Date(v.lockedSince as string) : undefined,
       exitAttempts: typeof v.exitAttempts === 'number' ? v.exitAttempts : 0,
-      lastExitAttempt: v.lastExitAttempt
-        ? new Date(v.lastExitAttempt as string)
-        : undefined,
+      lastExitAttempt: v.lastExitAttempt ? new Date(v.lastExitAttempt as string) : undefined,
       lockedOut: Boolean(v.lockedOut),
       lockoutUntil: v.lockoutUntil ? new Date(v.lockoutUntil as string) : undefined,
     };
@@ -287,7 +285,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
    */
   async function updateKioskState(
     deviceId: string,
-    updates: Partial<KioskState>
+    updates: Partial<KioskState>,
   ): Promise<KioskState> {
     const current = (await getKioskState(deviceId)) ?? {
       deviceId,
@@ -331,10 +329,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
   /**
    * Handle exit kiosk command
    */
-  async function handleExitKiosk(
-    device: Device,
-    command: Command
-  ): Promise<CommandResult> {
+  async function handleExitKiosk(device: Device, command: Command): Promise<CommandResult> {
     if (!allowRemoteExit) {
       return {
         success: false,
@@ -374,10 +369,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
   /**
    * Handle enter kiosk command
    */
-  async function handleEnterKiosk(
-    device: Device,
-    command: Command
-  ): Promise<CommandResult> {
+  async function handleEnterKiosk(device: Device, command: Command): Promise<CommandResult> {
     const payload = command.payload as { app?: string } | undefined;
 
     // Get policy kiosk settings
@@ -425,9 +417,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
   /**
    * Validate kiosk policy settings
    */
-  function validateKioskPolicy(
-    settings: PolicySettings
-  ): { valid: boolean; errors?: string[] } {
+  function validateKioskPolicy(settings: PolicySettings): { valid: boolean; errors?: string[] } {
     const errors: string[] = [];
 
     if (settings.kioskMode) {
@@ -560,10 +550,13 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
         // Check lockout
         if (state.lockedOut && state.lockoutUntil) {
           if (new Date() < state.lockoutUntil) {
-            return context.json({
-              error: 'Exit attempts locked',
-              lockoutUntil: state.lockoutUntil.toISOString(),
-            }, 403);
+            return context.json(
+              {
+                error: 'Exit attempts locked',
+                lockoutUntil: state.lockoutUntil.toISOString(),
+              },
+              403,
+            );
           } else {
             // Lockout expired
             await updateKioskState(deviceId, {
@@ -595,9 +588,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
 
           if (newAttempts >= maxExitAttempts) {
             // Lock out
-            const lockoutUntil = new Date(
-              Date.now() + lockoutDuration * 60 * 1000
-            );
+            const lockoutUntil = new Date(Date.now() + lockoutDuration * 60 * 1000);
 
             await updateKioskState(deviceId, {
               exitAttempts: newAttempts,
@@ -613,21 +604,27 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
               lockoutUntil: lockoutUntil.toISOString(),
             });
 
-            return context.json({
-              error: 'Max attempts exceeded',
-              lockedOut: true,
-              lockoutUntil: lockoutUntil.toISOString(),
-            }, 403);
+            return context.json(
+              {
+                error: 'Max attempts exceeded',
+                lockedOut: true,
+                lockoutUntil: lockoutUntil.toISOString(),
+              },
+              403,
+            );
           } else {
             await updateKioskState(deviceId, {
               exitAttempts: newAttempts,
               lastExitAttempt: new Date(),
             });
 
-            return context.json({
-              error: 'Invalid password',
-              attemptsRemaining: maxExitAttempts - newAttempts,
-            }, 401);
+            return context.json(
+              {
+                error: 'Invalid password',
+                attemptsRemaining: maxExitAttempts - newAttempts,
+              },
+              401,
+            );
           }
         }
       },
@@ -685,9 +682,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
 
     async onDestroy(): Promise<void> {
       inMemoryFallback.clear();
-      mdm?.logger
-        .child({ component: 'plugin-kiosk' })
-        .info('Plugin destroyed');
+      mdm?.logger.child({ component: 'plugin-kiosk' }).info('Plugin destroyed');
     },
 
     routes,
@@ -751,10 +746,7 @@ export function kioskPlugin(options: KioskPluginOptions = {}): MDMPlugin {
 
     commandTypes: ['enterKiosk', 'exitKiosk'] as any,
 
-    executeCommand: async (
-      device: Device,
-      command: Command
-    ): Promise<CommandResult> => {
+    executeCommand: async (device: Device, command: Command): Promise<CommandResult> => {
       switch (command.type) {
         case 'enterKiosk':
           return handleEnterKiosk(device, command);

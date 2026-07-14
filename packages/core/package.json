@@ -33,7 +33,9 @@
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write ."
   },
   "dependencies": {
     "nanoid": "^5.0.0"

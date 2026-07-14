@@ -1,10 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
-  wantsAgentProtocolV2,
-  agentOk,
-  agentFail,
   AGENT_PROTOCOL_HEADER,
   AGENT_PROTOCOL_V2,
+  agentFail,
+  agentOk,
+  wantsAgentProtocolV2,
 } from '../src/agent-protocol';
 
 describe('wantsAgentProtocolV2', () => {

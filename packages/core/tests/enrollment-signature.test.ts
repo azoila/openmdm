@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { generateEnrollmentSignature } from '../../client/src/index';
 import { verifyEnrollmentSignature } from '../src/index';
 import type { EnrollmentRequest } from '../src/types';
@@ -34,7 +34,7 @@ describe('Enrollment signature contract (client ↔ server)', () => {
     const signature = await generateEnrollmentSignature(
       data as unknown as Parameters<typeof generateEnrollmentSignature>[0],
       data.timestamp,
-      SECRET
+      SECRET,
     );
 
     const request: EnrollmentRequest = { ...data, signature };
@@ -46,7 +46,7 @@ describe('Enrollment signature contract (client ↔ server)', () => {
     const signature = await generateEnrollmentSignature(
       data as unknown as Parameters<typeof generateEnrollmentSignature>[0],
       data.timestamp,
-      SECRET
+      SECRET,
     );
 
     const tampered: EnrollmentRequest = {
@@ -62,7 +62,7 @@ describe('Enrollment signature contract (client ↔ server)', () => {
     const signature = await generateEnrollmentSignature(
       data as unknown as Parameters<typeof generateEnrollmentSignature>[0],
       data.timestamp,
-      SECRET
+      SECRET,
     );
 
     const tampered: EnrollmentRequest = {
@@ -78,7 +78,7 @@ describe('Enrollment signature contract (client ↔ server)', () => {
     const signature = await generateEnrollmentSignature(
       data as unknown as Parameters<typeof generateEnrollmentSignature>[0],
       data.timestamp,
-      SECRET
+      SECRET,
     );
 
     const request: EnrollmentRequest = { ...data, signature };
@@ -104,7 +104,7 @@ describe('Enrollment signature contract (client ↔ server)', () => {
     const signature = await generateEnrollmentSignature(
       data as unknown as Parameters<typeof generateEnrollmentSignature>[0],
       data.timestamp,
-      SECRET
+      SECRET,
     );
 
     const request: EnrollmentRequest = { ...data, signature };
@@ -116,14 +116,12 @@ describe('Enrollment signature contract (client ↔ server)', () => {
     const sigQr = await generateEnrollmentSignature(
       base as unknown as Parameters<typeof generateEnrollmentSignature>[0],
       base.timestamp,
-      SECRET
+      SECRET,
     );
     const sigNfc = await generateEnrollmentSignature(
-      { ...base, method: 'nfc' } as unknown as Parameters<
-        typeof generateEnrollmentSignature
-      >[0],
+      { ...base, method: 'nfc' } as unknown as Parameters<typeof generateEnrollmentSignature>[0],
       base.timestamp,
-      SECRET
+      SECRET,
     );
     expect(sigQr).not.toBe(sigNfc);
   });

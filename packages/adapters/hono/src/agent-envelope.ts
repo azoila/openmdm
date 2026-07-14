@@ -12,15 +12,16 @@
  * failures. The helpers do the version-detection and response-shape
  * selection so handlers stay small.
  */
-import type { Context } from 'hono';
-import { HTTPException } from 'hono/http-exception';
+
+import type { AgentAction } from '@openmdm/core';
 import {
   AGENT_PROTOCOL_HEADER,
-  agentOk as buildAgentOk,
   agentFail,
+  agentOk as buildAgentOk,
   wantsAgentProtocolV2,
 } from '@openmdm/core';
-import type { AgentAction } from '@openmdm/core';
+import type { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 
 /**
  * Returns true when the inbound request opts into protocol v2 via
