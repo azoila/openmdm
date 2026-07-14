@@ -83,11 +83,13 @@ openmdm/
 │   │   └── geofence/         # Geofencing plugin
 │   ├── client/               # Device-side SDK
 │   └── cli/                  # CLI tools
-├── apps/
-│   └── android-agent/        # Android Agent app (Kotlin)
 ├── examples/                 # Example applications
-└── docs/                     # Documentation
+├── tests/e2e/                # Integration tests against real Postgres
+└── docs/                     # Documentation website
 ```
+
+The Android agent and library live in a separate repository:
+[azoila/openmdm-android](https://github.com/azoila/openmdm-android).
 
 ## Making Changes
 
@@ -109,6 +111,9 @@ openmdm/
 3. **Run checks locally**
 
    ```bash
+   # Lint & format check (auto-fix with: pnpm lint:fix)
+   pnpm lint
+
    # Type check
    pnpm typecheck
 
@@ -156,9 +161,13 @@ openmdm/
 
 ### Code Style
 
-- Use 2 spaces for indentation
-- Use single quotes for strings
-- No semicolons (we use Prettier defaults)
+Style is enforced by [Biome](https://biomejs.dev) — run `pnpm lint` to check and
+`pnpm lint:fix` to auto-fix. The configuration (see `biome.json`) matches the existing
+codebase:
+
+- 2 spaces for indentation
+- Single quotes for strings
+- Semicolons required
 - Maximum line length of 100 characters
 
 ### Naming Conventions

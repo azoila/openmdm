@@ -68,8 +68,8 @@ await mdm.devices.sendCommand(deviceId, { type: 'reboot' });
 
 - **Embeddable** - Works within your existing application, not as a separate service
 - **HTTP Adapter** - First-class Hono adapter with the full REST surface (Express, Fastify and Next.js adapters are on the roadmap)
-- **Database Agnostic** - Bring your own database with Drizzle, Prisma, or raw SQL
-- **Push Notifications** - FCM, MQTT, and WebSocket support
+- **Bring Your Own Database** - Drizzle ORM adapter for PostgreSQL today (Prisma and more dialects are planned)
+- **Push Notifications** - FCM and MQTT adapters (WebSocket is on the roadmap)
 - **S3 Storage** - Presigned URLs for APK uploads (AWS S3, MinIO, DigitalOcean Spaces)
 - **Webhooks** - HMAC-signed outbound webhooks with retry logic
 - **Plugin System** - Extend with kiosk, geofence, and custom plugins
@@ -81,14 +81,14 @@ await mdm.devices.sendCommand(deviceId, { type: 'reboot' });
 |---------|-------------|--------|
 | [`@openmdm/core`](./packages/core) | Core MDM SDK - devices, policies, commands, events | Stable |
 | [`@openmdm/storage-s3`](./packages/storage/s3) | S3 storage adapter for APK uploads | Stable |
-| [`@openmdm/drizzle-adapter`](./packages/adapters/drizzle) | Database adapter for Drizzle ORM | Stable |
+| [`@openmdm/drizzle-adapter`](./packages/adapters/drizzle) | Drizzle ORM adapter (PostgreSQL) | Stable |
 | [`@openmdm/hono`](./packages/adapters/hono) | Hono framework adapter with REST API routes | Stable |
 | [`@openmdm/push-fcm`](./packages/push/fcm) | Firebase Cloud Messaging push adapter | Stable |
-| [`@openmdm/push-mqtt`](./packages/push/mqtt) | MQTT push adapter for private networks | Stable |
-| [`@openmdm/client`](./packages/client) | Device-side SDK for Android agents | Stable |
+| [`@openmdm/push-mqtt`](./packages/push/mqtt) | MQTT push adapter for private networks | Beta |
+| [`@openmdm/client`](./packages/client) | Device-side SDK for Android agents | Beta |
 | [`@openmdm/plugin-kiosk`](./packages/plugins/kiosk) | Kiosk/lockdown mode plugin | Stable |
-| [`@openmdm/plugin-geofence`](./packages/plugins/geofence) | Geofencing and location-based policies | Stable |
-| [`@openmdm/cli`](./packages/cli) | Command-line tools for administration | Stable |
+| [`@openmdm/plugin-geofence`](./packages/plugins/geofence) | Geofencing and location-based policies | Beta |
+| [`@openmdm/cli`](./packages/cli) | Command-line tools for administration | Beta |
 
 ## Quick Start
 
@@ -225,7 +225,7 @@ app.route('/mdm', honoAdapter(mdm));
 
 The Android Agent is maintained in a separate repository for easier customization and forking:
 
-**Repository**: [openmdm/openmdm-android](https://github.com/openmdm/openmdm-android)
+**Repository**: [azoila/openmdm-android](https://github.com/azoila/openmdm-android)
 
 ### Features
 
@@ -242,17 +242,17 @@ The Android Agent is maintained in a separate repository for easier customizatio
 
 ```bash
 # Clone the Android agent
-git clone https://github.com/openmdm/openmdm-android
+git clone https://github.com/azoila/openmdm-android
 
 # Build the full agent app
 cd openmdm-android
 ./gradlew :agent:assembleRelease
 
-# Or use the library in your own app
-implementation("com.github.openmdm:openmdm-android:library:0.1.0")
+# Or use the library in your own app (via JitPack)
+implementation("com.github.azoila:openmdm-android:0.2.0")
 ```
 
-See the [openmdm-android README](https://github.com/openmdm/openmdm-android) for full documentation.
+See the [openmdm-android README](https://github.com/azoila/openmdm-android) for full documentation.
 
 ## Push Notification Providers
 
@@ -423,15 +423,14 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 ## Community
 
 - [Discord](https://discord.gg/openmdm) - Chat with the community
-- [GitHub Discussions](https://github.com/openmdm/openmdm/discussions) - Ask questions, share ideas
+- [GitHub Discussions](https://github.com/azoila/openmdm/discussions) - Ask questions, share ideas
 - [Twitter](https://twitter.com/openmdm) - Updates and announcements
 
 ## Documentation
 
 - [API Reference](https://openmdm.dev/docs/api)
 - [Architecture & Design](./docs/MDM-ANALYSIS-AND-ARCHITECTURE.md)
-- [Migration from Headwind](./docs/migration-headwind.md)
-- [Android Agent Setup](https://github.com/openmdm/openmdm-android)
+- [Android Agent Setup](https://github.com/azoila/openmdm-android)
 
 ## License
 
@@ -449,6 +448,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 **Built with TypeScript. Inspired by [better-auth](https://github.com/better-auth/better-auth).**
 
-[Documentation](https://openmdm.dev) | [GitHub](https://github.com/openmdm/openmdm) | [Discord](https://discord.gg/openmdm)
+[Documentation](https://openmdm.dev) | [GitHub](https://github.com/azoila/openmdm) | [Discord](https://discord.gg/openmdm)
 
 </div>

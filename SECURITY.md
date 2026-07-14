@@ -2,11 +2,18 @@
 
 ## Supported Versions
 
-We release patches for security vulnerabilities for the following versions:
+OpenMDM packages are versioned independently (see the [changelog index](./CHANGELOG.md)).
+While the project is pre-1.0, we release security patches for the **latest minor version of
+each published package**:
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| Package | Supported |
+| ------- | --------- |
+| `@openmdm/core` | 0.9.x |
+| `@openmdm/hono` | 1.0.x |
+| `@openmdm/drizzle-adapter` | 0.5.x |
+| All other `@openmdm/*` packages | latest minor |
+
+Older minors do not receive patches — upgrade to the latest release.
 
 ## Reporting a Vulnerability
 

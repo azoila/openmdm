@@ -1,52 +1,21 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+OpenMDM packages are versioned independently and released with
+[changesets](https://github.com/changesets/changesets). **Release notes live in each
+package's own changelog** — this file is an index.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+| Package | Changelog |
+|---------|-----------|
+| `@openmdm/core` | [packages/core/CHANGELOG.md](./packages/core/CHANGELOG.md) |
+| `@openmdm/hono` | [packages/adapters/hono/CHANGELOG.md](./packages/adapters/hono/CHANGELOG.md) |
+| `@openmdm/drizzle-adapter` | [packages/adapters/drizzle/CHANGELOG.md](./packages/adapters/drizzle/CHANGELOG.md) |
+| `@openmdm/push-fcm` | [packages/push/fcm/CHANGELOG.md](./packages/push/fcm/CHANGELOG.md) |
+| `@openmdm/push-mqtt` | [packages/push/mqtt/CHANGELOG.md](./packages/push/mqtt/CHANGELOG.md) |
+| `@openmdm/storage-s3` | [packages/storage/s3/CHANGELOG.md](./packages/storage/s3/CHANGELOG.md) |
+| `@openmdm/plugin-kiosk` | [packages/plugins/kiosk/CHANGELOG.md](./packages/plugins/kiosk/CHANGELOG.md) |
+| `@openmdm/plugin-geofence` | [packages/plugins/geofence/CHANGELOG.md](./packages/plugins/geofence/CHANGELOG.md) |
+| `@openmdm/client` | [packages/client/CHANGELOG.md](./packages/client/CHANGELOG.md) |
+| `@openmdm/cli` | [packages/cli/CHANGELOG.md](./packages/cli/CHANGELOG.md) |
 
-## [Unreleased]
-
-### Added
-- Initial release of OpenMDM
-- Core SDK (`@openmdm/core`) with device, policy, application, command, and group management
-- S3 storage adapter (`@openmdm/storage-s3`) for APK uploads with presigned URLs
-- FCM push adapter (`@openmdm/push-fcm`) for Firebase Cloud Messaging
-- MQTT push adapter (`@openmdm/push-mqtt`) for private network deployments
-- Drizzle ORM adapter (`@openmdm/drizzle-adapter`) for database integration
-- Hono framework adapter (`@openmdm/hono`) for REST API routes
-- Kiosk mode plugin (`@openmdm/plugin-kiosk`)
-- Geofencing plugin (`@openmdm/plugin-geofence`)
-- Device-side client SDK (`@openmdm/client`)
-- CLI tools (`@openmdm/cli`)
-- Android Agent app with Kotlin/Jetpack Compose
-- Webhook delivery system with HMAC signing and retry logic
-- App version tracking and rollback support
-- Comprehensive database schema for MDM operations
-
-### Security
-- HMAC-SHA256 device authentication
-- JWT device tokens with configurable expiration
-- Webhook signature verification
-- Secure enrollment flow
-
-## [0.1.0] - 2024-XX-XX
-
-### Added
-- Initial public release
-
----
-
-## Release Notes Format
-
-### Types of Changes
-
-- **Added** for new features
-- **Changed** for changes in existing functionality
-- **Deprecated** for soon-to-be removed features
-- **Removed** for now removed features
-- **Fixed** for any bug fixes
-- **Security** for vulnerability fixes
-
-[Unreleased]: https://github.com/azoila/openmdm/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/azoila/openmdm/releases/tag/v0.1.0
+Per-release GitHub Releases are published automatically for every package version:
+see [Releases](https://github.com/azoila/openmdm/releases).
