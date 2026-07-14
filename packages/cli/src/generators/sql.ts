@@ -33,6 +33,65 @@ export function generateSqlSchema(options: SqlGeneratorOptions): string {
   }
 }
 
+/**
+ * Order tables so a table is created after everything it references.
+ *
+ * The generator used to emit tables in declaration order, and `mdm_devices` —
+ * declared first — carries a foreign key to `mdm_policies`, declared after it.
+ * Postgres rejected the very first CREATE TABLE with
+ * `relation "mdm_policies" does not exist`, so the SQL this generator produced
+ * had never actually run against a database.
+ *
+ * Kahn's algorithm over the `references` edges. A cycle (none today) falls back
+ * to declaration order for the remainder rather than dropping tables.
+ */
+function topologicallySortedTables(): Array<[string, (typeof mdmSchema.tables)[string]]> {
+  const entries = Object.entries(mdmSchema.tables);
+  const names = new Set(entries.map(([name]) => name));
+
+  const dependencies = new Map<string, Set<string>>();
+  for (const [name, table] of entries) {
+    const deps = new Set<string>();
+    for (const column of Object.values(table.columns)) {
+      const ref = (column as { references?: { table: string } }).references?.table;
+      // Self-references (e.g. mdm_groups.parent_id) do not affect creation order.
+      if (ref && ref !== name && names.has(ref)) {
+        deps.add(ref);
+      }
+    }
+    dependencies.set(name, deps);
+  }
+
+  const sorted: Array<[string, (typeof mdmSchema.tables)[string]]> = [];
+  const emitted = new Set<string>();
+
+  while (sorted.length < entries.length) {
+    const ready = entries.filter(
+      ([name]) =>
+        !emitted.has(name) && [...dependencies.get(name)!].every((dep) => emitted.has(dep)),
+    );
+
+    if (ready.length === 0) {
+      // Cyclic FKs — emit whatever is left in declaration order rather than
+      // silently dropping tables.
+      for (const entry of entries) {
+        if (!emitted.has(entry[0])) {
+          sorted.push(entry);
+          emitted.add(entry[0]);
+        }
+      }
+      break;
+    }
+
+    for (const entry of ready) {
+      sorted.push(entry);
+      emitted.add(entry[0]);
+    }
+  }
+
+  return sorted;
+}
+
 function generatePostgresSchema(tablePrefix: string): string {
   const lines: string[] = [
     '-- OpenMDM PostgreSQL Schema',
@@ -55,8 +114,8 @@ function generatePostgresSchema(tablePrefix: string): string {
     lines.push('');
   }
 
-  // Generate tables
-  for (const [tableName, table] of Object.entries(mdmSchema.tables)) {
+  // Generate tables, parents before children.
+  for (const [tableName, table] of topologicallySortedTables()) {
     lines.push(generatePostgresTable(tableName, table, tablePrefix));
     lines.push('');
 
@@ -196,8 +255,8 @@ function generateMysqlSchema(tablePrefix: string): string {
     '',
   ];
 
-  // Generate tables
-  for (const [tableName, table] of Object.entries(mdmSchema.tables)) {
+  // Generate tables, parents before children.
+  for (const [tableName, table] of topologicallySortedTables()) {
     lines.push(generateMysqlTable(tableName, table, tablePrefix));
     lines.push('');
   }
@@ -309,8 +368,8 @@ function generateSqliteSchema(tablePrefix: string): string {
     '',
   ];
 
-  // Generate tables
-  for (const [tableName, table] of Object.entries(mdmSchema.tables)) {
+  // Generate tables, parents before children.
+  for (const [tableName, table] of topologicallySortedTables()) {
     lines.push(generateSqliteTable(tableName, table, tablePrefix));
     lines.push('');
 

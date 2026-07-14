@@ -84,6 +84,7 @@ export const mdmSchema: SchemaDefinition = {
     mdm_devices: {
       columns: {
         id: { type: 'string', primaryKey: true },
+        tenant_id: { type: 'string', nullable: true },
         external_id: { type: 'string', nullable: true },
         enrollment_id: { type: 'string', unique: true },
         status: {
@@ -108,6 +109,12 @@ export const mdmSchema: SchemaDefinition = {
           references: { table: 'mdm_policies', column: 'id', onDelete: 'set null' },
         },
         agent_version: { type: 'string', nullable: true }, // MDM agent version installed on device
+        // Policy compliance: the version the device reports having applied.
+        applied_policy_version: { type: 'integer', nullable: true },
+        policy_applied_at: { type: 'datetime', nullable: true },
+        // Device-pinned-key enrollment (Phase 2b).
+        public_key: { type: 'text', nullable: true },
+        enrollment_method: { type: 'string', nullable: true },
         last_heartbeat: { type: 'datetime', nullable: true },
         last_sync: { type: 'datetime', nullable: true },
 
@@ -130,6 +137,7 @@ export const mdmSchema: SchemaDefinition = {
       },
       indexes: [
         { columns: ['enrollment_id'], unique: true },
+        { columns: ['tenant_id'] },
         { columns: ['status'] },
         { columns: ['policy_id'] },
         { columns: ['last_heartbeat'] },
@@ -144,10 +152,13 @@ export const mdmSchema: SchemaDefinition = {
     mdm_policies: {
       columns: {
         id: { type: 'string', primaryKey: true },
+        tenant_id: { type: 'string', nullable: true },
         name: { type: 'string' },
         description: { type: 'text', nullable: true },
         is_default: { type: 'boolean', default: false },
         settings: { type: 'json' },
+        // Monotonic; bumped only when `settings` change.
+        version: { type: 'integer', default: 1 },
         created_at: { type: 'datetime', default: 'now' },
         updated_at: { type: 'datetime', default: 'now' },
       },
@@ -160,6 +171,7 @@ export const mdmSchema: SchemaDefinition = {
     mdm_applications: {
       columns: {
         id: { type: 'string', primaryKey: true },
+        tenant_id: { type: 'string', nullable: true },
         name: { type: 'string' },
         package_name: { type: 'string' },
         version: { type: 'string' },
@@ -196,6 +208,7 @@ export const mdmSchema: SchemaDefinition = {
     mdm_commands: {
       columns: {
         id: { type: 'string', primaryKey: true },
+        tenant_id: { type: 'string', nullable: true },
         device_id: {
           type: 'string',
           references: { table: 'mdm_devices', column: 'id', onDelete: 'cascade' },
@@ -204,7 +217,15 @@ export const mdmSchema: SchemaDefinition = {
         payload: { type: 'json', nullable: true },
         status: {
           type: 'enum',
-          enumValues: ['pending', 'sent', 'acknowledged', 'completed', 'failed', 'cancelled'],
+          enumValues: [
+            'pending',
+            'sent',
+            'acknowledged',
+            'completed',
+            'failed',
+            'cancelled',
+            'expired',
+          ],
           default: 'pending',
         },
         result: { type: 'json', nullable: true },
@@ -213,12 +234,30 @@ export const mdmSchema: SchemaDefinition = {
         sent_at: { type: 'datetime', nullable: true },
         acknowledged_at: { type: 'datetime', nullable: true },
         completed_at: { type: 'datetime', nullable: true },
+
+        // Delivery durability. See the Command type in @openmdm/core.
+        idempotency_key: { type: 'string', nullable: true },
+        expires_at: { type: 'datetime', nullable: true },
+        attempt_count: { type: 'integer', default: 0 },
+        max_attempts: { type: 'integer', default: 5 },
+        last_attempt_at: { type: 'datetime', nullable: true },
       },
       indexes: [
         { columns: ['device_id'] },
+        { columns: ['tenant_id'] },
         { columns: ['status'] },
         { columns: ['device_id', 'status'] },
         { columns: ['created_at'] },
+        // Drives the retry sweep and the expiry reaper.
+        { columns: ['status', 'last_attempt_at'] },
+        { columns: ['expires_at'] },
+        // NOTE: the runtime adapter also creates a PARTIAL unique index on
+        // (device_id, idempotency_key) WHERE idempotency_key IS NOT NULL, which
+        // is what makes the ON CONFLICT DO NOTHING insert atomic. This schema
+        // format cannot express a partial index, so `openmdm generate` emits a
+        // plain unique index instead — functionally equivalent here, because
+        // Postgres treats NULLs as distinct in a unique index.
+        { columns: ['device_id', 'idempotency_key'], unique: true },
       ],
     },
 
@@ -250,6 +289,7 @@ export const mdmSchema: SchemaDefinition = {
     mdm_groups: {
       columns: {
         id: { type: 'string', primaryKey: true },
+        tenant_id: { type: 'string', nullable: true },
         name: { type: 'string' },
         description: { type: 'text', nullable: true },
         policy_id: {
@@ -699,6 +739,50 @@ export const mdmSchema: SchemaDefinition = {
     // ----------------------------------------
     // Plugin Storage Table
     // ----------------------------------------
+    // ----------------------------------------
+    // Policy Versions Table
+    // ----------------------------------------
+    // Immutable snapshots of a policy's settings, one row per version. Written
+    // on every settings change so history is replayable and any prior version
+    // can be restored.
+    mdm_policy_versions: {
+      columns: {
+        id: { type: 'string', primaryKey: true },
+        policy_id: {
+          type: 'string',
+          references: { table: 'mdm_policies', column: 'id', onDelete: 'cascade' },
+        },
+        version: { type: 'integer' },
+        settings: { type: 'json' },
+        created_by: { type: 'string', nullable: true },
+        note: { type: 'text', nullable: true },
+        created_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [
+        { columns: ['policy_id'] },
+        // A snapshot is written once per version and never rewritten.
+        { columns: ['policy_id', 'version'], unique: true },
+      ],
+    },
+
+    // ----------------------------------------
+    // Enrollment Challenges Table
+    // ----------------------------------------
+    // Single-use challenges for device-pinned-key enrollment (Phase 2b). The
+    // runtime drizzle adapter has always required this table; it was missing
+    // from this declaration, so `openmdm generate` produced a schema the
+    // adapter could not actually run against and consumers hand-patched the
+    // generated file.
+    mdm_enrollment_challenges: {
+      columns: {
+        challenge: { type: 'string', primaryKey: true },
+        expires_at: { type: 'datetime' },
+        consumed_at: { type: 'datetime', nullable: true },
+        created_at: { type: 'datetime', default: 'now' },
+      },
+      indexes: [{ columns: ['expires_at'] }],
+    },
+
     mdm_plugin_storage: {
       columns: {
         plugin_name: { type: 'string' },
