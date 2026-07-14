@@ -155,6 +155,14 @@ export interface DeviceZoneState {
   enteredAt?: Date;
   exitedAt?: Date;
   dwellTime?: number;
+  /**
+   * The policy the device carried *before* this zone's `policyOverride` was
+   * applied. Recorded on entry so exit can put it back — without it, "revert
+   * the override" has nothing to revert to, which is why the old
+   * implementation only logged and left the device on the zone's policy
+   * forever.
+   */
+  previousPolicyId?: string | null;
 }
 
 export interface LocationHistoryEntry {
@@ -345,12 +353,131 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
 
   let mdm: MDMInstance;
 
-  // In-memory storage (should be moved to DB adapter in production)
-  const zones = new Map<string, GeofenceZone>();
-  const deviceZoneStates = new Map<string, Map<string, DeviceZoneState>>();
+  // ============================================
+  // Persistence
+  // ============================================
+  //
+  // Zones and device-zone state used to live in plain in-process Maps, with a
+  // comment conceding they "should be moved to DB adapter in production". They
+  // were lost on every restart and invisible to a second replica: every zone an
+  // operator had drawn vanished, and every device silently forgot which zones it
+  // was inside — so the next heartbeat re-fired `enter` for zones the device had
+  // been sitting in for a week, re-applying policy overrides and re-firing
+  // webhooks.
+  //
+  // They now persist through `mdm.pluginStorage` (the same mechanism the kiosk
+  // plugin uses). When the host has not configured it, we fall back to in-memory
+  // Maps with a loud warning — acceptable for local development and tests only.
+  const PLUGIN_NAME = 'geofence';
+  /** Bound a zone webhook so a hanging endpoint cannot stall heartbeat processing. */
+  const WEBHOOK_TIMEOUT_MS = 10_000;
+  const ZONE_PREFIX = 'zone:';
+  const STATE_PREFIX = 'state:';
+
+  const zoneFallback = new Map<string, GeofenceZone>();
+  const stateFallback = new Map<string, Record<string, DeviceZoneState>>();
+
+  /** Location history stays in-process: it is a convenience buffer, not state. */
   const locationHistory = new Map<string, LocationHistoryEntry[]>();
 
   let zoneIdCounter = 1;
+
+  function storage(): MDMInstance['pluginStorage'] {
+    return mdm?.pluginStorage;
+  }
+
+  function log() {
+    return mdm.logger.child({ component: 'plugin-geofence' });
+  }
+
+  /** Dates round-trip through JSON as strings; rehydrate them on read. */
+  function rehydrateZone(value: unknown): GeofenceZone | null {
+    if (!value || typeof value !== 'object') return null;
+    return value as GeofenceZone;
+  }
+
+  function rehydrateState(value: unknown): Record<string, DeviceZoneState> {
+    if (!value || typeof value !== 'object') return {};
+    const raw = value as Record<string, any>;
+    const out: Record<string, DeviceZoneState> = {};
+    for (const [zoneId, state] of Object.entries(raw)) {
+      out[zoneId] = {
+        ...state,
+        enteredAt: state.enteredAt ? new Date(state.enteredAt) : undefined,
+        exitedAt: state.exitedAt ? new Date(state.exitedAt) : undefined,
+      };
+    }
+    return out;
+  }
+
+  async function loadZones(): Promise<Map<string, GeofenceZone>> {
+    const store = storage();
+    if (!store) return zoneFallback;
+
+    const keys = await store.list(PLUGIN_NAME, ZONE_PREFIX);
+    const loaded = new Map<string, GeofenceZone>();
+    for (const key of keys) {
+      const zone = rehydrateZone(await store.get(PLUGIN_NAME, key));
+      if (zone) loaded.set(zone.id, zone);
+    }
+    return loaded;
+  }
+
+  async function saveZone(zone: GeofenceZone): Promise<void> {
+    const store = storage();
+    if (!store) {
+      zoneFallback.set(zone.id, zone);
+      return;
+    }
+    await store.set(PLUGIN_NAME, `${ZONE_PREFIX}${zone.id}`, zone);
+  }
+
+  async function removeZone(zoneId: string): Promise<void> {
+    const store = storage();
+    if (!store) {
+      zoneFallback.delete(zoneId);
+      return;
+    }
+    await store.delete(PLUGIN_NAME, `${ZONE_PREFIX}${zoneId}`);
+  }
+
+  async function loadDeviceStates(deviceId: string): Promise<Record<string, DeviceZoneState>> {
+    const store = storage();
+    if (!store) {
+      return stateFallback.get(deviceId) ?? {};
+    }
+    return rehydrateState(await store.get(PLUGIN_NAME, `${STATE_PREFIX}${deviceId}`));
+  }
+
+  async function saveDeviceStates(
+    deviceId: string,
+    states: Record<string, DeviceZoneState>,
+  ): Promise<void> {
+    const store = storage();
+    if (!store) {
+      stateFallback.set(deviceId, states);
+      return;
+    }
+    await store.set(PLUGIN_NAME, `${STATE_PREFIX}${deviceId}`, states);
+  }
+
+  /** Device ids we hold zone state for. O(devices) — admin routes only. */
+  async function listTrackedDeviceIds(): Promise<string[]> {
+    const store = storage();
+    if (!store) {
+      return Array.from(stateFallback.keys());
+    }
+    const keys = await store.list(PLUGIN_NAME, STATE_PREFIX);
+    return keys.map((key) => key.slice(STATE_PREFIX.length));
+  }
+
+  function serializeZone(zone: GeofenceZone) {
+    return {
+      ...zone,
+      createdAt: new Date(zone.createdAt).toISOString(),
+      updatedAt: new Date(zone.updatedAt).toISOString(),
+    };
+  }
 
   /**
    * Generate zone ID
@@ -381,15 +508,13 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
    * Process location update for a device
    */
   async function processLocation(device: Device, location: DeviceLocation): Promise<void> {
-    if (!deviceZoneStates.has(device.id)) {
-      deviceZoneStates.set(device.id, new Map());
-    }
-    const deviceStates = deviceZoneStates.get(device.id)!;
+    const zones = await loadZones();
+    const deviceStates = await loadDeviceStates(device.id);
 
     const currentZones: string[] = [];
 
     for (const [zoneId, zone] of zones) {
-      const wasInside = deviceStates.get(zoneId)?.inside ?? false;
+      const wasInside = deviceStates[zoneId]?.inside ?? false;
       const isInside = isInsideZone(location, zone);
 
       if (isInside) {
@@ -397,46 +522,58 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
       }
 
       if (isInside && !wasInside) {
-        // Device entered zone
+        // Device entered zone. Remember the policy it arrived with, so exit can
+        // put it back if this zone applies an override.
         const enteredAt = new Date();
-        deviceStates.set(zoneId, {
+        deviceStates[zoneId] = {
           deviceId: device.id,
           zoneId,
           inside: true,
           enteredAt,
-        });
+          previousPolicyId: zone.policyOverride ? (device.policyId ?? null) : undefined,
+        };
 
         // Check dwell time
         const dwellTime = (zone.metadata?.dwellTime as number) ?? defaultDwellTime;
 
         if (dwellTime > 0) {
+          // Dwell timers are in-process: a restart during the dwell window drops
+          // the pending enter, and the next heartbeat re-evaluates from scratch.
           setTimeout(async () => {
-            const state = deviceStates.get(zoneId);
-            if (state?.inside && state.enteredAt === enteredAt) {
-              await triggerEnter(device, zone);
+            const current = await loadDeviceStates(device.id);
+            const state = current[zoneId];
+            if (state?.inside && state.enteredAt?.getTime() === enteredAt.getTime()) {
+              await triggerEnter(device, zone, state);
             }
           }, dwellTime);
         } else {
-          await triggerEnter(device, zone);
+          await triggerEnter(device, zone, deviceStates[zoneId]);
         }
       } else if (!isInside && wasInside) {
         // Device exited zone
-        const state = deviceStates.get(zoneId);
-        deviceStates.set(zoneId, {
+        const previous = deviceStates[zoneId];
+        deviceStates[zoneId] = {
           deviceId: device.id,
           zoneId,
           inside: false,
-          enteredAt: state?.enteredAt,
+          enteredAt: previous?.enteredAt,
           exitedAt: new Date(),
-          dwellTime: state?.enteredAt ? Date.now() - state.enteredAt.getTime() : undefined,
-        });
+          dwellTime: previous?.enteredAt ? Date.now() - previous.enteredAt.getTime() : undefined,
+          previousPolicyId: previous?.previousPolicyId,
+        };
 
-        await triggerExit(device, zone);
+        await triggerExit(device, zone, zones, deviceStates);
       } else if (isInside) {
         // Device still inside
         await onInside?.(device, zone);
       }
     }
+
+    // Persist the device's zone membership. Without this the device forgets
+    // which zones it is inside on every restart, and the next heartbeat re-fires
+    // `enter` for zones it has been sitting in for a week — re-applying policy
+    // overrides and re-firing webhooks.
+    await saveDeviceStates(device.id, deviceStates);
 
     // Track history
     if (trackHistory) {
@@ -462,8 +599,15 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
   /**
    * Trigger enter event
    */
-  async function triggerEnter(device: Device, zone: GeofenceZone): Promise<void> {
-    console.log(`[OpenMDM Geofence] Device ${device.id} entered zone ${zone.name}`);
+  async function triggerEnter(
+    device: Device,
+    zone: GeofenceZone,
+    _state: DeviceZoneState,
+  ): Promise<void> {
+    log().info(
+      { deviceId: device.id, zoneId: zone.id, zoneName: zone.name },
+      'Device entered zone',
+    );
 
     await onEnter?.(device, zone);
 
@@ -490,13 +634,17 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
   /**
    * Trigger exit event
    */
-  async function triggerExit(device: Device, zone: GeofenceZone): Promise<void> {
-    console.log(`[OpenMDM Geofence] Device ${device.id} exited zone ${zone.name}`);
+  async function triggerExit(
+    device: Device,
+    zone: GeofenceZone,
+    zones: Map<string, GeofenceZone>,
+    deviceStates: Record<string, DeviceZoneState>,
+  ): Promise<void> {
+    log().info({ deviceId: device.id, zoneId: zone.id, zoneName: zone.name }, 'Device exited zone');
 
     await onExit?.(device, zone);
 
-    // Emit event
-    const state = deviceZoneStates.get(device.id)?.get(zone.id);
+    const state = deviceStates[zone.id];
     await mdm.emit('custom', {
       type: 'geofence.exit',
       deviceId: device.id,
@@ -511,19 +659,45 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
       await executeAction(device, zone.onExit, zone, 'exit');
     }
 
-    // Revert policy override (restore original policy)
-    if (zone.policyOverride && device.policyId !== zone.policyOverride) {
-      // Only if not still in another zone with same override
-      const stillInOverrideZone = Array.from(zones.values()).some(
-        (z) =>
-          z.id !== zone.id &&
-          z.policyOverride === zone.policyOverride &&
-          deviceZoneStates.get(device.id)?.get(z.id)?.inside,
+    // Revert the policy override.
+    //
+    // This used to be a `console.log` that said "Policy override ended" and did
+    // nothing — the device kept the zone's policy forever after leaving it, which
+    // is the exact opposite of what a geofenced override is for. We now record
+    // the pre-override policy on entry (`previousPolicyId`) and restore it here.
+    if (zone.policyOverride) {
+      // ...unless the device is still standing in another zone that applies the
+      // same override.
+      const stillOverridden = Array.from(zones.values()).some(
+        (other) =>
+          other.id !== zone.id &&
+          other.policyOverride === zone.policyOverride &&
+          deviceStates[other.id]?.inside,
       );
 
-      if (!stillInOverrideZone) {
-        // Revert to previous policy (would need to track original policy)
-        console.log(`[OpenMDM Geofence] Policy override ended for device ${device.id}`);
+      if (stillOverridden) {
+        log().debug(
+          { deviceId: device.id, zoneId: zone.id },
+          'Override retained: device is still inside another zone with the same override',
+        );
+      } else {
+        const restoreTo = state?.previousPolicyId ?? null;
+
+        if (restoreTo) {
+          await mdm.devices.assignPolicy(device.id, restoreTo);
+          log().info(
+            { deviceId: device.id, zoneId: zone.id, policyId: restoreTo },
+            'Reverted geofence policy override',
+          );
+        } else {
+          // The device had no policy before the override. Clear it rather than
+          // leaving the zone's policy stuck on a device that has left the zone.
+          await mdm.devices.update(device.id, { policyId: null });
+          log().info(
+            { deviceId: device.id, zoneId: zone.id },
+            'Cleared geofence policy override (device had no policy before entering)',
+          );
+        }
       }
     }
   }
@@ -569,6 +743,8 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
 
       case 'webhook':
         if (action.webhook) {
+          let controller: AbortController | undefined;
+          let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
           try {
             await fetch(action.webhook.url, {
               method: action.webhook.method || 'POST',
@@ -591,7 +767,21 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
               }),
             });
           } catch (error) {
-            console.error(`[OpenMDM Geofence] Webhook failed for zone ${zone.id}:`, error);
+            // Swallowed deliberately: a zone's webhook endpoint being down must
+            // not fail the heartbeat that triggered it. But it is logged, and the
+            // request is bounded — an endpoint that simply hangs used to stall
+            // heartbeat processing indefinitely, since there was no timeout.
+            log().warn(
+              {
+                zoneId: zone.id,
+                deviceId: device.id,
+                trigger,
+                err: error instanceof Error ? error.message : String(error),
+              },
+              'Geofence webhook failed',
+            );
+          } finally {
+            if (timeoutHandle) clearTimeout(timeoutHandle);
           }
         }
         break;
@@ -607,11 +797,8 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
       auth: true,
       admin: true,
       handler: async (context: any) => {
-        const zoneList = Array.from(zones.values()).map((zone) => ({
-          ...zone,
-          createdAt: zone.createdAt.toISOString(),
-          updatedAt: zone.updatedAt.toISOString(),
-        }));
+        const zones = await loadZones();
+        const zoneList = Array.from(zones.values()).map(serializeZone);
         return context.json({ zones: zoneList });
       },
     },
@@ -624,17 +811,14 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
       admin: true,
       handler: async (context: any) => {
         const { zoneId } = context.req.param();
+        const zones = await loadZones();
         const zone = zones.get(zoneId);
 
         if (!zone) {
           return context.json({ error: 'Zone not found' }, 404);
         }
 
-        return context.json({
-          ...zone,
-          createdAt: zone.createdAt.toISOString(),
-          updatedAt: zone.updatedAt.toISOString(),
-        });
+        return context.json(serializeZone(zone));
       },
     },
 
@@ -676,16 +860,9 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
           updatedAt: new Date(),
         };
 
-        zones.set(zone.id, zone);
+        await saveZone(zone);
 
-        return context.json(
-          {
-            ...zone,
-            createdAt: zone.createdAt.toISOString(),
-            updatedAt: zone.updatedAt.toISOString(),
-          },
-          201,
-        );
+        return context.json(serializeZone(zone), 201);
       },
     },
 
@@ -699,6 +876,7 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
         const { zoneId } = context.req.param();
         const body = (await context.req.json()) as UpdateGeofenceZoneInput;
 
+        const zones = await loadZones();
         const existing = zones.get(zoneId);
         if (!existing) {
           return context.json({ error: 'Zone not found' }, 404);
@@ -713,13 +891,9 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
           updatedAt: new Date(),
         };
 
-        zones.set(zoneId, updated);
+        await saveZone(updated);
 
-        return context.json({
-          ...updated,
-          createdAt: updated.createdAt.toISOString(),
-          updatedAt: updated.updatedAt.toISOString(),
-        });
+        return context.json(serializeZone(updated));
       },
     },
 
@@ -731,16 +905,22 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
       admin: true,
       handler: async (context: any) => {
         const { zoneId } = context.req.param();
+        const zones = await loadZones();
 
         if (!zones.has(zoneId)) {
           return context.json({ error: 'Zone not found' }, 404);
         }
 
-        zones.delete(zoneId);
+        await removeZone(zoneId);
 
-        // Clean up device states for this zone
-        for (const states of deviceZoneStates.values()) {
-          states.delete(zoneId);
+        // Drop this zone from every device's membership. A device still holding
+        // state for a deleted zone would keep reporting itself inside it.
+        for (const deviceId of await listTrackedDeviceIds()) {
+          const states = await loadDeviceStates(deviceId);
+          if (states[zoneId]) {
+            delete states[zoneId];
+            await saveDeviceStates(deviceId, states);
+          }
         }
 
         return context.json({ success: true });
@@ -755,14 +935,16 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
       admin: true,
       handler: async (context: any) => {
         const { zoneId } = context.req.param();
+        const zones = await loadZones();
 
         if (!zones.has(zoneId)) {
           return context.json({ error: 'Zone not found' }, 404);
         }
 
         const devicesInZone: string[] = [];
-        for (const [deviceId, states] of deviceZoneStates) {
-          if (states.get(zoneId)?.inside) {
+        for (const deviceId of await listTrackedDeviceIds()) {
+          const states = await loadDeviceStates(deviceId);
+          if (states[zoneId]?.inside) {
             devicesInZone.push(deviceId);
           }
         }
@@ -779,13 +961,10 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
       admin: true,
       handler: async (context: any) => {
         const { deviceId } = context.req.param();
-        const states = deviceZoneStates.get(deviceId);
+        const zones = await loadZones();
+        const states = await loadDeviceStates(deviceId);
 
-        if (!states) {
-          return context.json({ zones: [] });
-        }
-
-        const zoneStates = Array.from(states.values()).map((state) => ({
+        const zoneStates = Object.values(states).map((state) => ({
           ...state,
           enteredAt: state.enteredAt?.toISOString(),
           exitedAt: state.exitedAt?.toISOString(),
@@ -824,6 +1003,7 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
         const body = await context.req.json();
         const { latitude, longitude } = body;
 
+        const zones = await loadZones();
         const matchingZones: string[] = [];
         const location = { latitude, longitude, timestamp: new Date() };
 
@@ -850,14 +1030,27 @@ export function geofencePlugin(options: GeofencePluginOptions = {}): MDMPlugin {
 
     async onInit(instance: MDMInstance): Promise<void> {
       mdm = instance;
-      console.log('[OpenMDM Geofence] Plugin initialized');
+
+      if (!instance.pluginStorage) {
+        log().warn(
+          'pluginStorage is not configured — geofence zones and device zone ' +
+            'membership will be held in process memory only. They are lost on ' +
+            'restart and invisible to other replicas, so devices will re-fire ' +
+            '`enter` for zones they never left. Configure ' +
+            "`pluginStorage: { adapter: 'database' }` on createMDM for production.",
+        );
+      }
+
+      log().info('Geofence plugin initialized');
     },
 
     async onDestroy(): Promise<void> {
-      zones.clear();
-      deviceZoneStates.clear();
+      // Only the in-process caches are dropped. Persisted zones and device
+      // membership survive by design — that is the whole point.
+      zoneFallback.clear();
+      stateFallback.clear();
       locationHistory.clear();
-      console.log('[OpenMDM Geofence] Plugin destroyed');
+      log().info('Geofence plugin destroyed');
     },
 
     routes,
