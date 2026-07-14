@@ -1,5 +1,99 @@
 # @openmdm/hono
 
+## 1.1.0
+
+### Minor Changes
+
+- [#29](https://github.com/azoila/openmdm/pull/29) [`d141b72`](https://github.com/azoila/openmdm/commit/d141b72f54ae16b6064e5b12a38ac92ee7d02d18) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Fix the client↔server protocol break, close a device-auth bypass, and rate-limit enrollment.
+
+  **Breaking (security fix): a bare `X-Device-Id` header no longer authenticates.**
+  `deviceAuth` previously accepted the header as sufficient identity when no bearer
+  token was present. Device ids are enumerable, so anyone could read any device's
+  commands and config by sending the header. A verified device token is now the only
+  accepted identity. Agents that relied on the header must send their token.
+
+  **New agent routes.** `@openmdm/client` called four endpoints the adapter never
+  served, so token refresh, command polling, event reporting, and push-token removal
+  all 404'd against the shipped server:
+
+  - `POST /agent/refresh-token` — exchanges the current token for a fresh one. Not
+    behind `deviceAuth` by design: it accepts a recently-expired token (within the
+    server's renewal grace window) so an agent that slept past expiry can recover.
+    The signature is still fully verified, and unenrolled/blocked devices are refused.
+  - `GET /agent/commands/pending` — poll commands without a full heartbeat.
+  - `POST /agent/events` — agent-reported events (crashes, kiosk exit attempts).
+  - `DELETE /agent/push-token` — remove one provider's token, or all of them.
+
+  **Rate limiting** on the unauthenticated enrollment routes (`POST /agent/enroll`,
+  `GET /agent/enroll/challenge`), enabled by default at 60 requests/60s per client IP.
+  It is in-memory and per-process, so with N replicas the effective limit is N × max;
+  pass `rateLimit: false` if your reverse proxy already handles this.
+
+  **Client**: `refreshToken()` is now exposed on `MDMClient` for proactive rotation, and
+  the automatic 401 → refresh → retry path now uses the device token rather than a
+  `refreshToken` field the server never issued.
+
+  A new contract test suite drives the real client against the real adapter over HTTP,
+  so this class of divergence fails CI instead of shipping.
+
+- [#36](https://github.com/azoila/openmdm/pull/36) [`5d53670`](https://github.com/azoila/openmdm/commit/5d53670c1ab09fbbf330a35ee8dcd0e43e041082) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Desired state, device lifecycle, canonical app inventory, and update enforcement.
+
+  Four features, one system. Desired state is the primitive; the rest are built on it.
+
+  **Desired state (`devices.setDesiredState`).** A command is an _event_: miss it and the intent
+  is gone. Desired state is a _fact_ — it rides on every heartbeat until the device reports it has
+  applied that version. "Put this device in maintenance mode" belongs here, not in a command: a
+  maintenance flag that lives only client-side, or only in a command the device never received,
+  describes a device nobody can account for. `null` in a patch **deletes** the key rather than
+  storing null (unset is not the same fact as "set to off"), and re-submitting an unchanged state
+  does not bump the version — an operator clicking a toggle that is already in position must not
+  make the whole fleet re-report convergence for a change that never happened.
+  `devices.getConvergence()` answers whether the device has caught up; `device.converged` fires
+  when it does.
+
+  **Device lifecycle.** `devices.update` accepted any status from anywhere, so a device could go
+  from `unenrolled` straight back to `enrolled` without ever re-enrolling. Status writes now go
+  through a transition table. `devices.delete` **hard-DELETE'd the row**, cascading away the
+  device's entire command and audit history — so the one question you ask after a bad unenroll
+  ("what happened to this device?") was the one question the data could no longer answer. It now
+  tombstones (`deletedAt`); the device reads as gone to callers and is filtered out of listings,
+  but the history survives. Pass `{ hard: true }` for a genuine erase.
+
+  **Two-phase unenroll.** `beginUnenroll()` arms the device (`unenrolling`) and tells it to go;
+  `completeUnenroll()` finishes when it confirms. Flipping straight to `unenrolled` is what
+  strands fleets: the row says the device left while the device — which never received the
+  message — keeps heartbeating at a server that no longer recognises it. `cancelUnenroll()` calls
+  it off.
+
+  **Canonical app inventory.** App versions lived only inside the `installed_apps` JSON blob, so
+  "which devices run the broken build?" meant walking JSON for every device in the fleet, and a
+  reconcile loop could not express its central question in SQL at all. A new `mdm_device_apps`
+  table holds one row per (device, package) with observed _and_ desired versions. The JSON blob
+  remains the full inventory; this is the queryable form of the facts we act on.
+  `device.appVersionChanged` fires on a diff — versions used to be overwritten silently, so "when
+  did this fleet start running the broken build?" had no answer.
+
+  **Update enforcement (`mdm.updates`).** Issuing an `installApp` command is not the same as an
+  app being installed: the command can be delivered, acknowledged, and still leave the device on
+  the old version. Command durability covers _delivery_; nothing covered _outcome_.
+  `updates.reconcile()` compares observed against desired, re-issues with exponential backoff, and
+  escalates — once — when a device keeps taking the command without moving.
+  `updates.setDesiredAppVersion()` supports staged rollouts, bucketed by `hash(deviceId + version)`:
+  salting with the version is deliberate, because hashing the device id alone would make the same
+  unlucky 10% of the fleet the canary for every release forever. A device that has never installed
+  the app is treated as version `0.0.0`, not skipped — otherwise the engine is upgrade-only and a
+  freshly provisioned device silently never gets the app it exists to run.
+
+  Schema: `mdm_devices` gains `desired_state` (jsonb), `desired_state_version`,
+  `reported_state_version`, `state_reported_at`, `deleted_at`; the device status enum gains
+  `unenrolling`; the `unenroll` command type is new; and `mdm_device_apps` is added. Existing rows
+  take the defaults — no backfill.
+
+### Patch Changes
+
+- Updated dependencies [[`cdac7e1`](https://github.com/azoila/openmdm/commit/cdac7e14bd85721d642b9f75c1172ee8d14f0fec), [`c2c16ab`](https://github.com/azoila/openmdm/commit/c2c16ab77d7293a8d190f46ecd5f86bcf6b8704c), [`8ecf8ca`](https://github.com/azoila/openmdm/commit/8ecf8ca5902ce20523635d65a019bcb8d5aaad6e), [`5d53670`](https://github.com/azoila/openmdm/commit/5d53670c1ab09fbbf330a35ee8dcd0e43e041082), [`d141b72`](https://github.com/azoila/openmdm/commit/d141b72f54ae16b6064e5b12a38ac92ee7d02d18), [`1fa4bee`](https://github.com/azoila/openmdm/commit/1fa4bee350c5934ebb57d6c578bb5106a9853740), [`bd64cd7`](https://github.com/azoila/openmdm/commit/bd64cd711505e8724ead5a76af6a1e8c1449c558)]:
+  - @openmdm/core@0.10.0
+
 ## 1.0.0
 
 ### Major Changes
