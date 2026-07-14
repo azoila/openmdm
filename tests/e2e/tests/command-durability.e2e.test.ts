@@ -285,6 +285,69 @@ describe('command durability (e2e, real Postgres)', () => {
     });
   });
 
+  describe('acknowledged-command watchdog', () => {
+    /** Insert a command already acknowledged `secondsAgo` seconds in the past. */
+    async function seedAcked(secondsAgo: number, overrides = '') {
+      const command = await adapter.createCommand({ deviceId: 'device-1', type: 'installApp' });
+      await db.execute(sql`
+        UPDATE mdm_commands
+        SET status = 'acknowledged',
+            acknowledged_at = NOW() - make_interval(secs => ${secondsAgo})
+            ${sql.raw(overrides)}
+        WHERE id = ${command.id}
+      `);
+      return command;
+    }
+
+    it('finds a command acked longer ago than the timeout', async () => {
+      await seedAcked(120);
+
+      const stuck = await adapter.listStuckAcknowledgedCommands!({
+        now: new Date(),
+        ackTimeoutSeconds: 60,
+        limit: 10,
+      });
+
+      expect(stuck).toHaveLength(1);
+    });
+
+    it('leaves a freshly-acked command alone', async () => {
+      await seedAcked(5);
+
+      const stuck = await adapter.listStuckAcknowledgedCommands!({
+        now: new Date(),
+        ackTimeoutSeconds: 60,
+        limit: 10,
+      });
+
+      expect(stuck).toHaveLength(0);
+    });
+
+    it('ignores commands that are not acknowledged', async () => {
+      await adapter.createCommand({ deviceId: 'device-1', type: 'sync' });
+
+      const stuck = await adapter.listStuckAcknowledgedCommands!({
+        now: new Date(),
+        ackTimeoutSeconds: 0,
+        limit: 10,
+      });
+
+      expect(stuck).toHaveLength(0);
+    });
+
+    it('ignores expired commands — those belong to the reaper', async () => {
+      await seedAcked(120, ", expires_at = NOW() - INTERVAL '1 minute'");
+
+      const stuck = await adapter.listStuckAcknowledgedCommands!({
+        now: new Date(),
+        ackTimeoutSeconds: 60,
+        limit: 10,
+      });
+
+      expect(stuck).toHaveLength(0);
+    });
+  });
+
   describe('transaction()', () => {
     it('commits work done through adapter methods inside the callback', async () => {
       await adapter.transaction!(async () => {

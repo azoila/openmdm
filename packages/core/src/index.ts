@@ -362,11 +362,13 @@ export function createMDM(config: MDMConfig): MDMInstance {
   const DEFAULT_COMMAND_TTL_SECONDS = 7 * 24 * 60 * 60;
   const DEFAULT_COMMAND_MAX_ATTEMPTS = 5;
   const DEFAULT_RETRY_BACKOFF_SECONDS = 60;
+  const DEFAULT_ACK_TIMEOUT_SECONDS = 15 * 60;
 
   const commandDefaults = {
     ttlSeconds: config.commands?.defaultTtlSeconds ?? DEFAULT_COMMAND_TTL_SECONDS,
     maxAttempts: config.commands?.defaultMaxAttempts ?? DEFAULT_COMMAND_MAX_ATTEMPTS,
     backoffSeconds: config.commands?.retryBackoffSeconds ?? DEFAULT_RETRY_BACKOFF_SECONDS,
+    ackTimeoutSeconds: config.commands?.ackTimeoutSeconds ?? DEFAULT_ACK_TIMEOUT_SECONDS,
   };
 
   /**
@@ -1204,6 +1206,78 @@ export function createMDM(config: MDMConfig): MDMInstance {
         commandLog.info({ count }, 'Reaped expired commands');
       }
       return count;
+    },
+
+    async sweepStuck(options?: {
+      limit?: number;
+    }): Promise<{ requeued: number; deadLettered: number }> {
+      const result = { requeued: 0, deadLettered: 0 };
+
+      if (commandDefaults.ackTimeoutSeconds <= 0) {
+        return result;
+      }
+
+      if (!database.listStuckAcknowledgedCommands) {
+        commandLog.warn(
+          'Database adapter does not implement listStuckAcknowledgedCommands — a ' +
+            'command the device acknowledged and then never completed cannot be ' +
+            'recovered, and will sit acknowledged forever.',
+        );
+        return result;
+      }
+
+      const stuck = await database.listStuckAcknowledgedCommands({
+        now: new Date(),
+        ackTimeoutSeconds: commandDefaults.ackTimeoutSeconds,
+        limit: options?.limit ?? 100,
+      });
+
+      for (const command of stuck) {
+        const maxAttempts = command.maxAttempts ?? commandDefaults.maxAttempts;
+
+        // Out of attempts: don't spin forever on a device that keeps acking and
+        // dying. Dead-letter it so an operator sees it.
+        if ((command.attemptCount ?? 0) >= maxAttempts) {
+          await database.updateCommand(command.id, {
+            status: 'failed',
+            error: 'ACK_TIMEOUT_EXHAUSTED',
+            completedAt: new Date(),
+          });
+          result.deadLettered += 1;
+          commandLog.error(
+            { commandId: command.id, deviceId: command.deviceId },
+            'Command acknowledged but never completed, and out of attempts — dead-lettered',
+          );
+          continue;
+        }
+
+        // Back to pending so the next retryPending() sweep re-pushes it.
+        const requeued = await database.updateCommand(command.id, {
+          status: 'pending',
+          acknowledgedAt: null,
+        });
+        result.requeued += 1;
+
+        commandLog.warn(
+          { commandId: command.id, deviceId: command.deviceId, type: command.type },
+          'Command acknowledged but never completed — requeued for re-delivery',
+        );
+
+        const device = await database.findDevice(command.deviceId);
+        if (device && requeued) {
+          await emit('command.requeued', {
+            device,
+            command: requeued,
+            reason: 'ACK_TIMEOUT',
+          });
+        }
+      }
+
+      if (stuck.length > 0) {
+        commandLog.info({ ...result }, 'Stuck-command sweep complete');
+      }
+
+      return result;
     },
   };
 

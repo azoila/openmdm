@@ -635,6 +635,7 @@ export type EventType =
   | 'device.policyDrifted'
   | 'command.received'
   | 'command.acknowledged'
+  | 'command.requeued'
   | 'command.completed'
   | 'command.failed'
   | 'security.tamper'
@@ -981,6 +982,24 @@ export interface MDMConfig {
      * attempts (attempt N waits `base * 2^(N-1)`). Defaults to 60.
      */
     retryBackoffSeconds?: number;
+
+    /**
+     * How long a command may sit `acknowledged` — the device confirmed receipt
+     * but never reported completion — before `commands.sweepStuck()` requeues
+     * it for re-delivery. Defaults to 900 (15 minutes).
+     *
+     * This closes the ack-then-crash hole: `getPendingCommands` only returns
+     * `pending`/`sent`, so a device that acknowledged a command and then died
+     * mid-execution would never be given it again, and it would sit
+     * `acknowledged` forever.
+     *
+     * Delivery is therefore **at-least-once**: a device can receive an
+     * acknowledged-but-unfinished command a second time. Agents must be
+     * idempotent per `commandId` — which the OpenMDM Android agent is, since it
+     * persists command ids. Set to 0 to disable the sweep entirely if your
+     * agents cannot deduplicate.
+     */
+    ackTimeoutSeconds?: number;
   };
 
   /**
@@ -1327,6 +1346,16 @@ export interface DatabaseAdapter {
   expireCommands?(now: Date): Promise<number>;
 
   /**
+   * Commands stuck in `acknowledged` past the ack timeout — acknowledged by the
+   * device but never completed or failed.
+   */
+  listStuckAcknowledgedCommands?(options: {
+    now: Date;
+    ackTimeoutSeconds: number;
+    limit: number;
+  }): Promise<Command[]>;
+
+  /**
    * Commands still awaiting a successful push: `pending`, not expired, with
    * `attemptCount < maxAttempts`, whose backoff window has elapsed.
    */
@@ -1490,6 +1519,13 @@ export interface PushAdapter {
   subscribe?(deviceId: string, topic: string): Promise<void>;
   /** Unsubscribe device from topic */
   unsubscribe?(deviceId: string, topic: string): Promise<void>;
+  /**
+   * Release the adapter's resources (sockets, timers, in-flight waiters).
+   *
+   * Adapters that hold a long-lived connection — MQTT, WebSocket — leak it
+   * without this. Call it on process shutdown.
+   */
+  disconnect?(): Promise<void>;
 }
 
 export interface PushMessage {
@@ -1779,6 +1815,21 @@ export interface CommandManager {
    * number reaped. Call from the same scheduled job as `retryPending`.
    */
   expireStale(): Promise<number>;
+
+  /**
+   * Requeue commands stuck in `acknowledged` — the device confirmed receipt and
+   * then never reported completion, which is what an agent crashing
+   * mid-execution looks like from the server.
+   *
+   * Without this, such a command is lost: `getPendingCommands` only returns
+   * `pending`/`sent`, so the device is never given it again.
+   *
+   * Requeued commands go back to `pending` and are re-pushed by the next
+   * `retryPending()` sweep; commands that have exhausted `maxAttempts` are
+   * dead-lettered instead. Delivery is at-least-once — see
+   * `config.commands.ackTimeoutSeconds`.
+   */
+  sweepStuck(options?: { limit?: number }): Promise<{ requeued: number; deadLettered: number }>;
 }
 
 export interface GroupManager {
@@ -2432,6 +2483,11 @@ export interface EventPayloadMap {
   };
   'command.received': { device: Device; command: Command };
   'command.acknowledged': { device: Device; command: Command };
+  /**
+   * A command the device acknowledged but never completed was requeued for
+   * re-delivery. Usually means the agent crashed mid-execution.
+   */
+  'command.requeued': { device: Device; command: Command; reason: 'ACK_TIMEOUT' };
   'command.completed': { device: Device; command: Command; result: CommandResult };
   'command.failed': { device: Device; command: Command; error: string };
   'security.tamper': { device: Device; type: string; details?: unknown };
