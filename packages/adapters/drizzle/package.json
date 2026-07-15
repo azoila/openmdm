@@ -19,7 +19,8 @@
     },
     "./postgres": {
       "types": "./dist/postgres.d.ts",
-      "import": "./dist/postgres.js"
+      "import": "./dist/postgres.js",
+      "require": "./dist/postgres.cjs"
     }
   },
   "files": [
