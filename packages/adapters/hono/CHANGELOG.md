@@ -1,5 +1,12 @@
 # @openmdm/hono
 
+## 1.1.1
+
+### Patch Changes
+
+- Updated dependencies [[`5378703`](https://github.com/azoila/openmdm/commit/537870352eb58606c6af581c073ab9245cb1d71b)]:
+  - @openmdm/core@0.11.0
+
 ## 1.1.0
 
 ### Minor Changes
