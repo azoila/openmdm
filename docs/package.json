@@ -23,7 +23,7 @@
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "fumadocs-core": "^15.0.0",
-    "fumadocs-mdx": "^12.0.0",
+    "fumadocs-mdx": "^15.1.1",
     "fumadocs-ui": "^15.0.0",
     "geist": "^1.7.2",
     "lucide-react": "^0.460.0",
