@@ -30,7 +30,7 @@
     "ora": "^8.0.0",
     "dotenv": "^16.0.0",
     "qrcode": "^1.5.3",
-    "jiti": "^2.4.0"
+    "jiti": "^2.7.0"
   },
   "devDependencies": {
     "@types/inquirer": "^9.0.0",
