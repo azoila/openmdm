@@ -1,5 +1,24 @@
 # @openmdm/drizzle-adapter
 
+## 0.6.1
+
+### Patch Changes
+
+- [#38](https://github.com/azoila/openmdm/pull/38) [`81ea345`](https://github.com/azoila/openmdm/commit/81ea345b8decd2ee5a7719b474a5b19d661e5422) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Ship a CJS build of `@openmdm/drizzle-adapter/postgres` so drizzle-kit can load it.
+
+  The release notes tell consumers to point their schema tooling at
+  `@openmdm/drizzle-adapter/postgres`, but the subpath was published ESM-only —
+  and drizzle-kit resolves schema files through a CJS `require()`, which failed
+  with `ERR_PACKAGE_PATH_NOT_EXPORTED`. So the one tool the table definitions
+  exist for could not read them, and `drizzle-kit push`/`generate` against a
+  schema file that re-exports this subpath was broken out of the box.
+
+  The postgres entry now also builds to `dist/postgres.cjs` with a matching
+  `require` export condition. Only this entry gets a CJS build: it depends
+  solely on `drizzle-orm` (which ships both formats), while the runtime entry
+  and `./schema` depend on ESM-only packages (`nanoid`, `@openmdm/core`) and
+  would fail at require-time regardless.
+
 ## 0.6.0
 
 ### Minor Changes
