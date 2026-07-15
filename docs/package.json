@@ -22,7 +22,7 @@
     "@radix-ui/react-tooltip": "^1.2.12",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
-    "fumadocs-core": "^15.0.0",
+    "fumadocs-core": "^16.11.4",
     "fumadocs-mdx": "^12.0.0",
     "fumadocs-ui": "^15.0.0",
     "geist": "^1.7.2",
