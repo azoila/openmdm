@@ -370,6 +370,61 @@ describe('two-phase unenroll', () => {
     expect(Array.from(stack.db._commands.values())[0].type).toBe('factoryReset');
   });
 
+  it('queues an overridden command shape when the caller owns the wire protocol', async () => {
+    // A fleet mid-migration from a legacy agent protocol: the teardown
+    // funnel triggers on `custom`/{action}, not the native command type.
+    await stack.mdm.devices.beginUnenroll(device.id, {
+      command: { type: 'custom', payload: { action: 'unenroll' } },
+    });
+
+    const sent = Array.from(stack.db._commands.values());
+    expect(sent).toHaveLength(1);
+    expect(sent[0].type).toBe('custom');
+    expect(sent[0].payload).toEqual({ action: 'unenroll' });
+    // The default dedup key survives an override that doesn't carry its own.
+    expect(sent[0].idempotencyKey).toBe(`unenroll:${device.id}`);
+  });
+
+  it('lets an overridden command carry its own idempotency key', async () => {
+    await stack.mdm.devices.beginUnenroll(device.id, {
+      command: {
+        type: 'custom',
+        payload: { action: 'unenroll' },
+        idempotencyKey: 'teardown:custom-key',
+      },
+    });
+
+    expect(Array.from(stack.db._commands.values())[0].idempotencyKey).toBe('teardown:custom-key');
+  });
+
+  it('command override takes precedence over wipe for command selection', async () => {
+    await stack.mdm.devices.beginUnenroll(device.id, {
+      wipe: true,
+      command: { type: 'custom', payload: { action: 'unenroll' } },
+    });
+
+    expect(Array.from(stack.db._commands.values())[0].type).toBe('custom');
+  });
+
+  it('arms without queueing anything when queueCommand is false', async () => {
+    const armed = await stack.mdm.devices.beginUnenroll(device.id, {
+      queueCommand: false,
+    });
+
+    expect(armed.status).toBe('unenrolling');
+    expect(Array.from(stack.db._commands.values())).toHaveLength(0);
+  });
+
+  it('a queueCommand:false arm still completes and cancels normally', async () => {
+    await stack.mdm.devices.beginUnenroll(device.id, { queueCommand: false });
+    const restored = await stack.mdm.devices.cancelUnenroll(device.id);
+    expect(restored.status).toBe('enrolled');
+
+    await stack.mdm.devices.beginUnenroll(device.id, { queueCommand: false });
+    const gone = await stack.mdm.devices.completeUnenroll(device.id);
+    expect(gone.status).toBe('unenrolled');
+  });
+
   it('does not queue the same unenroll twice', async () => {
     await stack.mdm.devices.beginUnenroll(device.id);
     // An operator clicking twice must not queue two wipes.

@@ -1943,8 +1943,31 @@ export interface DeviceManager {
    * what breaks fleets — the row says the device left while the device, which
    * never received the message, keeps heartbeating at a server that no longer
    * knows it. `wipe: true` also issues a factory reset.
+   *
+   * By default the queued command is `unenroll` (or `factoryReset` with
+   * `wipe: true`) deduped under the idempotency key `unenroll:${id}`. Fleets
+   * whose agents consume a different wire shape (e.g. mid-migration from a
+   * legacy agent protocol) can pass `command` to override what is queued —
+   * the default idempotency key still applies unless the override carries its
+   * own — or `queueCommand: false` to arm the status without queueing
+   * anything. With `queueCommand: false` no command will ever ACK, so the
+   * caller is responsible for eventually calling {@link completeUnenroll}
+   * (or {@link cancelUnenroll}).
    */
-  beginUnenroll(id: string, options?: { wipe?: boolean; reason?: string }): Promise<Device>;
+  beginUnenroll(
+    id: string,
+    options?: {
+      wipe?: boolean;
+      reason?: string;
+      /**
+       * Override the queued command entirely. Takes precedence over `wipe`
+       * for command selection — the caller owns the wire shape.
+       */
+      command?: Omit<SendCommandInput, 'deviceId'>;
+      /** Set to `false` to arm the status without queueing a command. */
+      queueCommand?: boolean;
+    },
+  ): Promise<Device>;
 
   /**
    * Phase two: the device confirmed (or an operator forced it). Terminal.
