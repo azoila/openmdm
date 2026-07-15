@@ -63,7 +63,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.changesets.outputs.published == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const publishedPackages = ${{ steps.changesets.outputs.publishedPackages }};
