@@ -1,5 +1,45 @@
 # @openmdm/plugin-geofence
 
+## 0.3.0
+
+### Minor Changes
+
+- [#34](https://github.com/azoila/openmdm/pull/34) [`9505b97`](https://github.com/azoila/openmdm/commit/9505b97d958386b2e8ecdb410a6b465021cb98a3) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Persist geofence state, and actually revert policy overrides.
+
+  **Zones and device-zone membership now survive a restart.** They lived in plain in-process
+  `Map`s, with a source comment conceding they "should be moved to DB adapter in production".
+  Two things followed from that:
+
+  - Every zone an operator had drawn vanished when the process restarted.
+  - Every device forgot which zones it was inside — so the next heartbeat re-fired `enter` for a
+    zone the device had been parked in for a week, re-applying policy overrides and re-firing
+    webhooks.
+
+  State now persists through `mdm.pluginStorage`, the same mechanism the kiosk plugin already
+  used. Configure `pluginStorage: { adapter: 'database' }` on `createMDM`. Without it, the plugin
+  falls back to in-memory Maps and warns loudly at startup — acceptable for local development
+  only.
+
+  **The policy-override revert was a `console.log`.** On exit, the plugin logged "Policy override
+  ended" and did nothing. A device that drove into a geofenced zone kept that zone's policy
+  **forever after leaving it** — the exact opposite of what a geofenced override is for. The
+  plugin now records the device's pre-override policy on entry (`DeviceZoneState.previousPolicyId`)
+  and restores it on exit, unless the device is still standing in another zone that applies the
+  same override. When the device had no policy before entering, the override is cleared rather
+  than left stuck.
+
+  **Zone webhooks are bounded.** They had no timeout, so a zone webhook pointing at an endpoint
+  that simply hung would stall heartbeat processing indefinitely. Now aborted after 10 seconds;
+  failures are logged rather than swallowed silently, and still do not fail the heartbeat.
+
+  `console.*` replaced with the structured logger throughout. The package had no tests; it now
+  has coverage for persistence-across-restart and every branch of the override revert.
+
+### Patch Changes
+
+- Updated dependencies [[`cdac7e1`](https://github.com/azoila/openmdm/commit/cdac7e14bd85721d642b9f75c1172ee8d14f0fec), [`c2c16ab`](https://github.com/azoila/openmdm/commit/c2c16ab77d7293a8d190f46ecd5f86bcf6b8704c), [`8ecf8ca`](https://github.com/azoila/openmdm/commit/8ecf8ca5902ce20523635d65a019bcb8d5aaad6e), [`5d53670`](https://github.com/azoila/openmdm/commit/5d53670c1ab09fbbf330a35ee8dcd0e43e041082), [`d141b72`](https://github.com/azoila/openmdm/commit/d141b72f54ae16b6064e5b12a38ac92ee7d02d18), [`1fa4bee`](https://github.com/azoila/openmdm/commit/1fa4bee350c5934ebb57d6c578bb5106a9853740), [`bd64cd7`](https://github.com/azoila/openmdm/commit/bd64cd711505e8724ead5a76af6a1e8c1449c558)]:
+  - @openmdm/core@0.10.0
+
 ## 0.2.6
 
 ### Patch Changes
