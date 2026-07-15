@@ -163,11 +163,22 @@ const enrollCmd = program.command('enroll').description('Device enrollment comma
 
 enrollCmd
   .command('qr')
-  .description('Generate enrollment QR code')
+  .description(
+    'Generate an Android device-owner provisioning QR code (scan on a factory-reset device)',
+  )
+  .option('-s, --server-url <url>', 'MDM base URL as reachable from the device (or SERVER_URL env)')
+  .option('--secret <secret>', 'Enrollment secret to embed (or DEVICE_SECRET env)')
+  .option(
+    '--apk-url <url>',
+    'Agent APK download location (required for factory-reset provisioning)',
+  )
+  .option('--checksum <base64url>', 'APK signing-certificate SHA-256, URL-safe base64')
   .option('-p, --policy <policyId>', 'Pre-assign policy')
   .option('-g, --group <groupId>', 'Pre-assign group')
-  .option('-o, --output <path>', 'Save QR code to file')
+  .option('-t, --token <token>', 'Enrollment token / device code to embed')
+  .option('-o, --output <path>', 'Save QR code to file (.png or .svg)')
   .option('--ascii', 'Output ASCII QR code to terminal')
+  .option('--json', 'Print the raw provisioning payload only')
   .action(async (options) => {
     const { generateQR } = await import('./commands/enroll.js');
     await generateQR(options);

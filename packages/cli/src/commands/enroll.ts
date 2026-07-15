@@ -1,13 +1,35 @@
 import chalk from 'chalk';
-import fs from 'fs/promises';
 import ora from 'ora';
 import QRCode from 'qrcode';
 
+/**
+ * Android managed-provisioning QR generation.
+ *
+ * A device-owner provisioning QR is NOT an arbitrary URL: the Android
+ * setup wizard (scan launched by tapping the welcome screen 6 times on a
+ * factory-reset device) expects a JSON object of
+ * `android.app.extra.PROVISIONING_*` extras. This command emits that
+ * payload, carrying the OpenMDM-specific configuration in the
+ * `PROVISIONING_ADMIN_EXTRAS_BUNDLE` under the `openmdm.*` keys the
+ * agent's QREnrollmentParser reads.
+ */
+
+/** applicationId of the OpenMDM Android agent. */
+const AGENT_PACKAGE = 'com.openmdm.agent';
+/** Device-admin receiver component of the OpenMDM Android agent. */
+const AGENT_COMPONENT = 'com.openmdm.agent/.receiver.MDMDeviceAdminReceiver';
+
 interface QROptions {
+  serverUrl?: string;
+  secret?: string;
+  apkUrl?: string;
+  checksum?: string;
   policy?: string;
   group?: string;
+  token?: string;
   output?: string;
   ascii?: boolean;
+  json?: boolean;
 }
 
 interface TokenOptions {
@@ -16,96 +38,183 @@ interface TokenOptions {
   expires?: string;
 }
 
+/**
+ * Build the Android device-owner provisioning payload.
+ *
+ * Standard DPC extras identify and (optionally) fetch the agent APK; the
+ * admin-extras bundle carries what the agent needs to reach and enroll with
+ * the server. `apkUrl`/`checksum` are optional because they are only needed
+ * for factory-reset provisioning — a QR for a device that already has the
+ * agent installed omits them.
+ */
+export function buildProvisioningPayload(options: {
+  serverUrl: string;
+  secret?: string;
+  apkUrl?: string;
+  checksum?: string;
+  policyId?: string;
+  groupId?: string;
+  enrollmentToken?: string;
+}): Record<string, unknown> {
+  const adminExtras: Record<string, string> = {
+    'openmdm.server_url': options.serverUrl,
+  };
+  if (options.secret) adminExtras['openmdm.device_secret'] = options.secret;
+  if (options.enrollmentToken) adminExtras['openmdm.enrollment_token'] = options.enrollmentToken;
+  if (options.policyId) adminExtras['openmdm.policy_id'] = options.policyId;
+  if (options.groupId) adminExtras['openmdm.group_id'] = options.groupId;
+
+  const payload: Record<string, unknown> = {
+    'android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_NAME': AGENT_PACKAGE,
+    'android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME': AGENT_COMPONENT,
+    'android.app.extra.PROVISIONING_LEAVE_ALL_SYSTEM_APPS_ENABLED': true,
+    'android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE': adminExtras,
+  };
+  if (options.apkUrl) {
+    payload['android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION'] =
+      options.apkUrl;
+  }
+  if (options.checksum) {
+    payload['android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM'] = options.checksum;
+  }
+  return payload;
+}
+
 export async function generateQR(options: QROptions): Promise<void> {
-  console.log(chalk.blue('\\n🔗 Generate Enrollment QR Code\\n'));
-  console.log(
-    chalk.yellow(
-      '⚠  This command currently generates an unsigned, non-persisted enrollment payload.\\n' +
-        '   HMAC-signed and server-persisted enrollment tokens will land in Phase 2b\\n' +
-        '   (hardware-rooted identity). For now, use this only for development/testing.\\n',
-    ),
-  );
+  const serverUrl = options.serverUrl || process.env.SERVER_URL;
+  const secret = options.secret || process.env.DEVICE_SECRET;
 
-  const serverUrl = process.env.SERVER_URL || 'https://mdm.example.com';
-  const deviceSecret = process.env.DEVICE_SECRET;
-
-  if (!deviceSecret) {
-    console.log(chalk.yellow('Warning: DEVICE_SECRET not set. Using placeholder.'));
+  if (!serverUrl) {
+    console.error(
+      chalk.red(
+        'A server URL is required: pass --server-url <url> or set SERVER_URL.\n' +
+          'Use the URL as reachable FROM THE DEVICE (a LAN IP or public host — ' +
+          'never localhost).',
+      ),
+    );
+    process.exitCode = 1;
+    return;
   }
 
-  // Generate enrollment token
-  const enrollmentData = {
+  if (options.json) {
+    // Machine-readable: the payload and nothing else.
+    console.log(
+      JSON.stringify(
+        buildProvisioningPayload({
+          serverUrl,
+          secret,
+          apkUrl: options.apkUrl,
+          checksum: options.checksum,
+          policyId: options.policy,
+          groupId: options.group,
+          enrollmentToken: options.token,
+        }),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  console.log(chalk.blue('\n🔗 Generate Android Provisioning QR Code\n'));
+
+  if (!secret) {
+    console.log(
+      chalk.yellow(
+        '⚠  No device secret (--secret / DEVICE_SECRET). The QR will omit ' +
+          'openmdm.device_secret;\n   HMAC-fallback enrollment will not work — ' +
+          'only the device-pinned-key path (server ≥ 0.9\n   with challenge ' +
+          'storage) can enroll.\n',
+      ),
+    );
+  }
+  if (Boolean(options.apkUrl) !== Boolean(options.checksum)) {
+    console.log(
+      chalk.yellow(
+        '⚠  --apk-url and --checksum belong together: Android refuses to install ' +
+          'a downloaded DPC\n   without its signing-certificate checksum, and a ' +
+          'checksum without an APK does nothing.\n',
+      ),
+    );
+  }
+  if (!options.apkUrl) {
+    console.log(
+      chalk.gray(
+        'No --apk-url: this QR only works on devices that already have the agent ' +
+          'installed.\nFor factory-reset provisioning, pass --apk-url and --checksum.\n',
+      ),
+    );
+  }
+
+  const payload = buildProvisioningPayload({
     serverUrl,
-    enrollmentToken: generateEnrollmentToken(),
+    secret,
+    apkUrl: options.apkUrl,
+    checksum: options.checksum,
     policyId: options.policy,
     groupId: options.group,
-    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-  };
-
-  const enrollmentUrl = `${serverUrl}/enroll?token=${enrollmentData.enrollmentToken}`;
+    enrollmentToken: options.token,
+  });
+  const content = JSON.stringify(payload);
 
   const spinner = ora('Generating QR code...').start();
 
   try {
     if (options.ascii) {
-      // Generate ASCII QR for terminal
-      const ascii = await QRCode.toString(enrollmentUrl, {
+      const ascii = await QRCode.toString(content, {
         type: 'terminal',
         small: true,
       });
       spinner.stop();
       console.log(ascii);
     } else if (options.output) {
-      // Save to file
-      await QRCode.toFile(options.output, enrollmentUrl, {
-        width: 400,
+      // Type is inferred from the file extension (.png or .svg).
+      await QRCode.toFile(options.output, content, {
+        errorCorrectionLevel: 'M',
+        width: 512,
         margin: 2,
-        color: {
-          dark: '#000000',
-          light: '#FFFFFF',
-        },
       });
       spinner.succeed(`QR code saved to ${options.output}`);
     } else {
-      // Generate Data URL and display info
-      const dataUrl = await QRCode.toDataURL(enrollmentUrl, {
-        width: 200,
-        margin: 1,
-      });
-      spinner.succeed('QR code generated');
-
-      console.log(chalk.gray('\\nEnrollment URL:'));
-      console.log(chalk.cyan(enrollmentUrl));
+      spinner.stop();
+      console.log(JSON.stringify(payload, null, 2));
       console.log('');
-      console.log(chalk.gray('Base64 Data URL (first 100 chars):'));
-      console.log(chalk.gray(dataUrl.substring(0, 100) + '...'));
-      console.log('');
-      console.log(chalk.gray('Use --output to save to file, or --ascii to display in terminal.'));
+      console.log(
+        chalk.gray(
+          'Use --output enrollment.png to save a scannable image, or --ascii for the terminal.',
+        ),
+      );
     }
 
     console.log('');
-    console.log(chalk.gray('Enrollment details:'));
-    console.log(chalk.gray(`  Token: ${enrollmentData.enrollmentToken}`));
-    console.log(chalk.gray(`  Expires: ${enrollmentData.expiresAt}`));
-    if (options.policy) {
-      console.log(chalk.gray(`  Policy: ${options.policy}`));
-    }
-    if (options.group) {
-      console.log(chalk.gray(`  Group: ${options.group}`));
-    }
+    console.log(chalk.gray('Provisioning details:'));
+    console.log(chalk.gray(`  Server:   ${serverUrl}`));
+    console.log(
+      chalk.gray(`  Secret:   ${secret ? 'embedded (handle the QR like a credential)' : 'none'}`),
+    );
+    if (options.apkUrl) console.log(chalk.gray(`  APK:      ${options.apkUrl}`));
+    if (options.policy) console.log(chalk.gray(`  Policy:   ${options.policy}`));
+    if (options.group) console.log(chalk.gray(`  Group:    ${options.group}`));
+    console.log('');
+    console.log(
+      chalk.gray(
+        'Scan: factory-reset the device, tap the welcome screen 6 times, connect Wi-Fi, scan.',
+      ),
+    );
     console.log('');
   } catch (error) {
     spinner.fail('Failed to generate QR code');
-    console.error(chalk.red(error));
+    console.error(chalk.red(String(error)));
+    process.exitCode = 1;
   }
 }
 
 export async function generateToken(options: TokenOptions): Promise<void> {
-  console.log(chalk.blue('\\n🔑 Generate Enrollment Token\\n'));
+  console.log(chalk.blue('\n🔑 Generate Enrollment Token\n'));
   console.log(
     chalk.yellow(
-      '⚠  This command currently generates an unsigned, non-persisted token.\\n' +
-        '   HMAC-signed and server-persisted tokens will land in Phase 2b.\\n',
+      '⚠  This command currently generates an unsigned, non-persisted token.\n' +
+        '   HMAC-signed and server-persisted tokens will land in Phase 2b.\n',
     ),
   );
 
@@ -115,7 +224,7 @@ export async function generateToken(options: TokenOptions): Promise<void> {
   const token = generateEnrollmentToken();
   const expiresAt = new Date(Date.now() + expiresHours * 60 * 60 * 1000);
 
-  console.log(chalk.green('Enrollment Token Generated\\n'));
+  console.log(chalk.green('Enrollment Token Generated\n'));
   console.log(`  ${chalk.gray('Token:')}    ${chalk.cyan(token)}`);
   console.log(`  ${chalk.gray('Expires:')}  ${expiresAt.toISOString()}`);
   console.log(`  ${chalk.gray('Server:')}   ${serverUrl}`);
@@ -127,10 +236,10 @@ export async function generateToken(options: TokenOptions): Promise<void> {
     console.log(`  ${chalk.gray('Group:')}    ${options.group}`);
   }
 
-  console.log('\\n' + chalk.gray('Enrollment URL:'));
+  console.log('\n' + chalk.gray('Enrollment URL:'));
   console.log(chalk.cyan(`${serverUrl}/enroll?token=${token}`));
 
-  console.log('\\n' + chalk.gray('Android Intent URL:'));
+  console.log('\n' + chalk.gray('Android Intent URL:'));
   console.log(
     chalk.cyan(
       `intent://enroll?token=${token}#Intent;scheme=openmdm;package=com.openmdm.agent;end`,
