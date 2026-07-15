@@ -763,7 +763,12 @@ export function createMDM(config: MDMConfig): MDMInstance {
 
     async beginUnenroll(
       id: string,
-      options?: { wipe?: boolean; reason?: string },
+      options?: {
+        wipe?: boolean;
+        reason?: string;
+        command?: Omit<SendCommandInput, 'deviceId'>;
+        queueCommand?: boolean;
+      },
     ): Promise<Device> {
       const device = await database.findDevice(id);
       if (!device) throw new DeviceNotFoundError(id);
@@ -776,14 +781,32 @@ export function createMDM(config: MDMConfig): MDMInstance {
       // exactly the bug: the row says the device left, while the device (which
       // never got the message) keeps heartbeating at a server that no longer
       // recognises it.
-      await this.sendCommand(id, {
-        type: options?.wipe ? 'factoryReset' : 'unenroll',
-        // The same unenroll must not queue twice if an operator clicks twice.
-        idempotencyKey: `unenroll:${id}`,
-      });
+      //
+      // `command` lets fleets whose agents consume a different wire shape
+      // override what is queued (the spread wins over the defaults, so an
+      // override without its own idempotencyKey keeps the dedup key);
+      // `queueCommand: false` arms the status without queueing anything —
+      // the caller then owns delivering the teardown message AND eventually
+      // calling completeUnenroll/cancelUnenroll, since nothing will ACK.
+      if (options?.queueCommand !== false) {
+        await this.sendCommand(id, {
+          type: options?.wipe ? 'factoryReset' : 'unenroll',
+          // The same unenroll must not queue twice if an operator clicks twice.
+          idempotencyKey: `unenroll:${id}`,
+          ...options?.command,
+        });
+      }
 
       deviceLog.info(
-        { deviceId: id, wipe: Boolean(options?.wipe), reason: options?.reason },
+        {
+          deviceId: id,
+          wipe: Boolean(options?.wipe),
+          reason: options?.reason,
+          queuedCommand:
+            options?.queueCommand === false
+              ? null
+              : (options?.command?.type ?? (options?.wipe ? 'factoryReset' : 'unenroll')),
+        },
         'Device armed for unenroll',
       );
       await emit('device.statusChanged', {
