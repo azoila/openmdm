@@ -1,5 +1,40 @@
 # @openmdm/cli
 
+## 0.5.0
+
+### Minor Changes
+
+- [#35](https://github.com/azoila/openmdm/pull/35) [`cdac7e1`](https://github.com/azoila/openmdm/commit/cdac7e14bd85721d642b9f75c1172ee8d14f0fec) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Make `openmdm generate` emit a schema that actually works.
+
+  **The generated SQL never ran.** Tables were emitted in declaration order, and `mdm_devices` —
+  declared first — carries a foreign key to `mdm_policies`, declared after it. Postgres rejected
+  the very first statement with `relation "mdm_policies" does not exist`. The SQL this generator
+  produced had never successfully built a database, and nothing caught it because nothing ever
+  executed it. Tables are now topologically sorted by their foreign-key dependencies (all three
+  dialects), and a new e2e test pipes the generated schema into a real Postgres on every CI run.
+
+  **The declared schema was missing tables and columns the adapter requires.** `mdmSchema` in
+  core is the single source the CLI generates from, and it had drifted from the runtime schema:
+  no `mdm_enrollment_challenges` (required for device-pinned-key enrollment), no
+  `mdm_policy_versions`, and missing `public_key`, `enrollment_method`, `tenant_id`,
+  `applied_policy_version`, and every command-durability column. Consumers who ran
+  `openmdm generate` got a schema the adapter could not run against, and hand-patched the
+  generated file — carrying a "do not regenerate this" warning in their own repo.
+
+  A **parity test** now asserts every runtime table and column is declared, so this drifts into a
+  red build rather than a support ticket.
+
+  **`openmdm migrate` no longer prints stale hand-written SQL.** It shipped a ~180-line blob
+  maintained by hand inside the command, which declared `VARCHAR(255)` primary keys where the
+  schema says `varchar(36)` and omitted four tables entirely. Both the schema and the rollback are
+  now derived from `mdmSchema`, so they cannot drift again. (The command still only prints SQL and
+  keeps no migration history — use `openmdm generate` with drizzle-kit for that.)
+
+### Patch Changes
+
+- Updated dependencies [[`cdac7e1`](https://github.com/azoila/openmdm/commit/cdac7e14bd85721d642b9f75c1172ee8d14f0fec), [`c2c16ab`](https://github.com/azoila/openmdm/commit/c2c16ab77d7293a8d190f46ecd5f86bcf6b8704c), [`8ecf8ca`](https://github.com/azoila/openmdm/commit/8ecf8ca5902ce20523635d65a019bcb8d5aaad6e), [`5d53670`](https://github.com/azoila/openmdm/commit/5d53670c1ab09fbbf330a35ee8dcd0e43e041082), [`d141b72`](https://github.com/azoila/openmdm/commit/d141b72f54ae16b6064e5b12a38ac92ee7d02d18), [`1fa4bee`](https://github.com/azoila/openmdm/commit/1fa4bee350c5934ebb57d6c578bb5106a9853740), [`bd64cd7`](https://github.com/azoila/openmdm/commit/bd64cd711505e8724ead5a76af6a1e8c1449c558)]:
+  - @openmdm/core@0.10.0
+
 ## 0.4.2
 
 ### Patch Changes

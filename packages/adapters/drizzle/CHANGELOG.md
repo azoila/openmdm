@@ -1,5 +1,247 @@
 # @openmdm/drizzle-adapter
 
+## 0.6.0
+
+### Minor Changes
+
+- [#30](https://github.com/azoila/openmdm/pull/30) [`c2c16ab`](https://github.com/azoila/openmdm/commit/c2c16ab77d7293a8d190f46ecd5f86bcf6b8704c) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Make command delivery durable: idempotency, expiry, retry, and dead-lettering.
+
+  Previously `sendCommand` pushed once and, if the push failed, silently left the command
+  `pending` with no record of the attempt and nothing to retry it. A command could sit stuck
+  forever, and a `factoryReset` queued for a device that stayed offline for months would fire
+  the moment it came back. The `MessageQueueManager` had retry and expiry logic, but
+  `sendCommand` never used it — they were two disconnected systems.
+
+  **Idempotency.** `SendCommandInput.idempotencyKey` deduplicates sends per device: a repeat
+  returns the existing command instead of queueing the operation twice — what you want when a
+  retrying HTTP client double-posts "wipe this device". The Drizzle adapter implements this as
+  `INSERT ... ON CONFLICT DO NOTHING` against a partial unique index on
+  `(device_id, idempotency_key)`, so concurrent senders race in the database rather than in
+  application code. Adapters that don't implement `createCommandIdempotent` fall back to
+  find-then-create, which narrows the duplicate window without closing it.
+
+  **Expiry.** Commands carry `expiresAt`, defaulting to `config.commands.defaultTtlSeconds`
+  (7 days; set `0` for no default). Expired commands are withheld from `getPending` even if the
+  reaper hasn't run, and `commands.expireStale()` reaps them to a new `expired` status.
+
+  **Retry and dead-lettering.** A failed push now records the attempt and leaves the command
+  retryable. `commands.retryPending()` re-pushes commands whose exponential backoff has elapsed
+  (`config.commands.retryBackoffSeconds`, default 60s) and dead-letters those that exhaust
+  `maxAttempts` (default 5) to `failed` with a `DELIVERY_EXHAUSTED` error, emitting
+  `command.failed`. Call both sweeps from a scheduled job.
+
+  **Fixed: `transaction()` was not transactional.** The Drizzle adapter opened a transaction and
+  then ran the callback against the _outer_ connection, so nothing inside it participated — a
+  partial failure left half-written state committed. The transaction handle now flows through
+  `AsyncLocalStorage`, so adapter calls made inside the callback join the transaction and roll
+  back together. Nested calls join the enclosing transaction.
+
+  New `DatabaseAdapter` optional methods: `createCommandIdempotent`, `findCommandByIdempotencyKey`,
+  `expireCommands`, `listRetryableCommands`. New `CommandStatus` value: `expired`. New
+  `mdm_commands` columns: `idempotency_key`, `expires_at`, `attempt_count`, `max_attempts`,
+  `last_attempt_at` — existing rows take the defaults, so no backfill is required.
+
+- [#33](https://github.com/azoila/openmdm/pull/33) [`8ecf8ca`](https://github.com/azoila/openmdm/commit/8ecf8ca5902ce20523635d65a019bcb8d5aaad6e) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Make push delivery honest, and recover commands a device acked then dropped.
+
+  **MQTT no longer reports success for a message the device never acknowledged.** On ack
+  timeout the adapter resolved `{ success: true }` — so a command pushed to a device that had
+  been offline for a week was reported delivered, marked `sent`, and never retried. It now
+  resolves `{ success: false, error: 'ACK_TIMEOUT: ...' }`, which lets the retry sweep do its
+  job. Configurable via `ack.timeoutMs`; `ack.treatTimeoutAsSuccess` restores the old behaviour
+  for fleets whose agents genuinely do not publish acks.
+
+  **MQTT presence tracking actually works.** `mqttExtendedAdapter` spread the base adapter and
+  then built its _own_ empty presence map — one the broker subscription never wrote to. So
+  `getDeviceStatus()` always returned `undefined`, `getOnlineDevices()` always returned `[]`, and
+  `isDeviceOnline()` always returned `false`, regardless of how many devices were connected. An
+  operator asking "which devices are online?" was told "none", forever. Both adapters now read
+  the same state by construction.
+
+  **MQTT `disconnect()` is real.** It used to only log. The client, its reconnect timer, and every
+  pending-ack timer leaked for the life of the process; callers awaiting an ack hung forever. It
+  now closes the connection and settles in-flight waiters as failures. Added to the `PushAdapter`
+  contract as an optional method.
+
+  **MQTT `reconnect.maxRetries` is enforced.** It was declared in the options and wired to nothing,
+  so an unreachable broker was retried forever with no way to stop.
+
+  **FCM retries transient failures.** One attempt was all a message ever got, so an FCM hiccup
+  (`server-unavailable`, a 503 under load) was reported as permanent. Now retried with exponential
+  backoff (`retry.maxAttempts`, default 3). Permanent failures — unregistered token, invalid
+  argument — are _not_ retried: they fail identically every time, so retrying only adds latency.
+
+  **Both adapters use the structured logger** instead of `console.*` (29 call sites), so their
+  output lands in the host's logging pipeline.
+
+  **New: `commands.sweepStuck()`** closes the ack-then-crash hole. `getPendingCommands` only
+  returns `pending`/`sent`, so a device that acknowledged a command and then died mid-execution
+  would never be given it again — the command sat `acknowledged` forever. Stuck commands are now
+  requeued for re-delivery (or dead-lettered once attempts are exhausted), emitting
+  `command.requeued`. Delivery is therefore at-least-once: agents must be idempotent per
+  `commandId`. Tune with `config.commands.ackTimeoutSeconds` (default 15 min; `0` disables).
+
+- [#36](https://github.com/azoila/openmdm/pull/36) [`5d53670`](https://github.com/azoila/openmdm/commit/5d53670c1ab09fbbf330a35ee8dcd0e43e041082) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Desired state, device lifecycle, canonical app inventory, and update enforcement.
+
+  Four features, one system. Desired state is the primitive; the rest are built on it.
+
+  **Desired state (`devices.setDesiredState`).** A command is an _event_: miss it and the intent
+  is gone. Desired state is a _fact_ — it rides on every heartbeat until the device reports it has
+  applied that version. "Put this device in maintenance mode" belongs here, not in a command: a
+  maintenance flag that lives only client-side, or only in a command the device never received,
+  describes a device nobody can account for. `null` in a patch **deletes** the key rather than
+  storing null (unset is not the same fact as "set to off"), and re-submitting an unchanged state
+  does not bump the version — an operator clicking a toggle that is already in position must not
+  make the whole fleet re-report convergence for a change that never happened.
+  `devices.getConvergence()` answers whether the device has caught up; `device.converged` fires
+  when it does.
+
+  **Device lifecycle.** `devices.update` accepted any status from anywhere, so a device could go
+  from `unenrolled` straight back to `enrolled` without ever re-enrolling. Status writes now go
+  through a transition table. `devices.delete` **hard-DELETE'd the row**, cascading away the
+  device's entire command and audit history — so the one question you ask after a bad unenroll
+  ("what happened to this device?") was the one question the data could no longer answer. It now
+  tombstones (`deletedAt`); the device reads as gone to callers and is filtered out of listings,
+  but the history survives. Pass `{ hard: true }` for a genuine erase.
+
+  **Two-phase unenroll.** `beginUnenroll()` arms the device (`unenrolling`) and tells it to go;
+  `completeUnenroll()` finishes when it confirms. Flipping straight to `unenrolled` is what
+  strands fleets: the row says the device left while the device — which never received the
+  message — keeps heartbeating at a server that no longer recognises it. `cancelUnenroll()` calls
+  it off.
+
+  **Canonical app inventory.** App versions lived only inside the `installed_apps` JSON blob, so
+  "which devices run the broken build?" meant walking JSON for every device in the fleet, and a
+  reconcile loop could not express its central question in SQL at all. A new `mdm_device_apps`
+  table holds one row per (device, package) with observed _and_ desired versions. The JSON blob
+  remains the full inventory; this is the queryable form of the facts we act on.
+  `device.appVersionChanged` fires on a diff — versions used to be overwritten silently, so "when
+  did this fleet start running the broken build?" had no answer.
+
+  **Update enforcement (`mdm.updates`).** Issuing an `installApp` command is not the same as an
+  app being installed: the command can be delivered, acknowledged, and still leave the device on
+  the old version. Command durability covers _delivery_; nothing covered _outcome_.
+  `updates.reconcile()` compares observed against desired, re-issues with exponential backoff, and
+  escalates — once — when a device keeps taking the command without moving.
+  `updates.setDesiredAppVersion()` supports staged rollouts, bucketed by `hash(deviceId + version)`:
+  salting with the version is deliberate, because hashing the device id alone would make the same
+  unlucky 10% of the fleet the canary for every release forever. A device that has never installed
+  the app is treated as version `0.0.0`, not skipped — otherwise the engine is upgrade-only and a
+  freshly provisioned device silently never gets the app it exists to run.
+
+  Schema: `mdm_devices` gains `desired_state` (jsonb), `desired_state_version`,
+  `reported_state_version`, `state_reported_at`, `deleted_at`; the device status enum gains
+  `unenrolling`; the `unenroll` command type is new; and `mdm_device_apps` is added. Existing rows
+  take the defaults — no backfill.
+
+- [#18](https://github.com/azoila/openmdm/pull/18) [`a848312`](https://github.com/azoila/openmdm/commit/a84831290411cbe8c71a505a00a0844b98a2db52) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Remove the `./mysql` and `./sqlite` export subpaths. These were placeholder modules that
+  threw `not yet implemented` at import time, so no working code depended on them — but the
+  package advertised dialect support it could not deliver. The adapter is PostgreSQL-only for
+  now (the runtime implementation uses pg-specific `onConflictDoUpdate`/`.returning()`);
+  MySQL/SQLite support is planned. Use `@openmdm/drizzle-adapter/postgres` for
+  table definitions.
+
+- [#32](https://github.com/azoila/openmdm/pull/32) [`1fa4bee`](https://github.com/azoila/openmdm/commit/1fa4bee350c5934ebb57d6c578bb5106a9853740) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Policy versioning, history, rollback, and drift detection.
+
+  Policies mutated in place with no version. Devices have always reported a `policyVersion` in
+  every heartbeat, and core never read it — so "is this device running the current policy?" was
+  a question the system could not answer. There was no rollout state, no drift detection, no
+  history, and no way back to a previous policy after a bad change.
+
+  - **`Policy.version`** — monotonic, starting at 1. Bumped only when `settings` change: renaming
+    a policy must not mark the entire fleet as drifted.
+  - **History** — every settings change writes an immutable snapshot. `policies.history(id)` and
+    `policies.getVersion(id, n)`.
+  - **`policies.rollback(id, toVersion)`** — restores earlier settings. It rolls **forward**: the
+    restored settings become a _new_ version rather than rewinding the counter. Rewinding would
+    make the rollback invisible to a device that had already applied the version being restored —
+    it would compare its applied version against an identical number, conclude it was compliant,
+    and never re-apply.
+  - **Drift detection** — heartbeats now record the reported version. A device behind its policy
+    raises `device.policyDrifted` on _every_ heartbeat, not once: a device that never converges
+    should keep announcing itself rather than going quiet after a single alert.
+  - **Compliance** — `devices.getPolicyCompliance(id)` returns `compliant | pending | unknown |
+unassigned`; `policies.getCompliance(id)` returns fleet rollout state with the lagging device
+    ids.
+  - **New events**: `policy.updated`, `policy.rolledBack`, `device.policyDrifted`.
+
+  **Also fixed: the plugin `validatePolicy` hook was never called.** It has been part of the
+  plugin interface all along, so a plugin could declare a policy invalid and be silently ignored.
+  It now runs on policy create and update, and a rejection fails the write.
+
+  Schema: `mdm_policies.version`, `mdm_devices.applied_policy_version` / `policy_applied_at`, and
+  a new `mdm_policy_versions` table (unique on `(policy_id, version)` — a snapshot is written once
+  and never rewritten, so a duplicate is a bug, not a race to tolerate). Existing policies default
+  to version 1; no backfill required. Adapters that don't supply a `policyVersions` table keep
+  versioning and drift detection and lose only history/rollback.
+
+- [#31](https://github.com/azoila/openmdm/pull/31) [`bd64cd7`](https://github.com/azoila/openmdm/commit/bd64cd711505e8724ead5a76af6a1e8c1449c558) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Enforce tenant isolation, RBAC, and audit logging — `mdm.withContext(...)`.
+
+  `TenantManager`, `AuthorizationManager`, and `AuditManager` all existed, and core never
+  called any of them. The default behaviour of every manager method was therefore: return
+  **every tenant's** data, check **no** permissions, and record **nothing**. The test suite
+  pinned this as known-broken (`tenant-isolation.pinning.test.ts`) rather than fixing it.
+
+  **`mdm.withContext({ tenantId, userId })`** returns a scoped instance with the same manager
+  APIs, on which all three concerns are enforced on every call:
+
+  ```typescript
+  const scoped = mdm.withContext({ tenantId: "acme", userId: user.id });
+  await scoped.devices.list(); // only Acme's devices — filtered in SQL
+  await scoped.devices.delete(id); // 'delete:devices' enforced, and audited
+  ```
+
+  The **root instance stays unscoped by design** — it is the system caller (enrollment,
+  delivery sweeps, single-tenant embeds), where there is no user to authorize and no tenant to
+  infer. Anything driven by a user request should go through a scoped instance.
+
+  Three properties worth calling out:
+
+  - **A cross-tenant read is indistinguishable from a miss.** Fetching another tenant's device
+    id returns `null`, and mutating it raises `NotFound` — never a distinct authorization
+    error, which would confirm the id exists elsewhere.
+  - **Tenant scoping fails closed.** A scoped instance built on an adapter that does not
+    declare `supportsTenantScoping` throws at construction rather than silently ignoring the
+    filter and serving every tenant's rows.
+  - **Failed attempts are audited, not just successful ones.** A denied permission and a
+    cross-tenant reach are both recorded — an audit trail containing only successes is not much
+    of a trail. Reads are not audited by default (they would drown the table).
+
+  `Device`, `Policy`, `Application`, `Group`, and `Command` gain an optional `tenantId`; the
+  Drizzle adapter adds a nullable `tenant_id` column (indexed) to each table, persists it on
+  create, and filters on it. Existing single-tenant rows keep `NULL` and behave exactly as
+  before — no backfill required.
+
+### Patch Changes
+
+- [#35](https://github.com/azoila/openmdm/pull/35) [`cdac7e1`](https://github.com/azoila/openmdm/commit/cdac7e14bd85721d642b9f75c1172ee8d14f0fec) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Make `openmdm generate` emit a schema that actually works.
+
+  **The generated SQL never ran.** Tables were emitted in declaration order, and `mdm_devices` —
+  declared first — carries a foreign key to `mdm_policies`, declared after it. Postgres rejected
+  the very first statement with `relation "mdm_policies" does not exist`. The SQL this generator
+  produced had never successfully built a database, and nothing caught it because nothing ever
+  executed it. Tables are now topologically sorted by their foreign-key dependencies (all three
+  dialects), and a new e2e test pipes the generated schema into a real Postgres on every CI run.
+
+  **The declared schema was missing tables and columns the adapter requires.** `mdmSchema` in
+  core is the single source the CLI generates from, and it had drifted from the runtime schema:
+  no `mdm_enrollment_challenges` (required for device-pinned-key enrollment), no
+  `mdm_policy_versions`, and missing `public_key`, `enrollment_method`, `tenant_id`,
+  `applied_policy_version`, and every command-durability column. Consumers who ran
+  `openmdm generate` got a schema the adapter could not run against, and hand-patched the
+  generated file — carrying a "do not regenerate this" warning in their own repo.
+
+  A **parity test** now asserts every runtime table and column is declared, so this drifts into a
+  red build rather than a support ticket.
+
+  **`openmdm migrate` no longer prints stale hand-written SQL.** It shipped a ~180-line blob
+  maintained by hand inside the command, which declared `VARCHAR(255)` primary keys where the
+  schema says `varchar(36)` and omitted four tables entirely. Both the schema and the rollback are
+  now derived from `mdmSchema`, so they cannot drift again. (The command still only prints SQL and
+  keeps no migration history — use `openmdm generate` with drizzle-kit for that.)
+
+- Updated dependencies [[`cdac7e1`](https://github.com/azoila/openmdm/commit/cdac7e14bd85721d642b9f75c1172ee8d14f0fec), [`c2c16ab`](https://github.com/azoila/openmdm/commit/c2c16ab77d7293a8d190f46ecd5f86bcf6b8704c), [`8ecf8ca`](https://github.com/azoila/openmdm/commit/8ecf8ca5902ce20523635d65a019bcb8d5aaad6e), [`5d53670`](https://github.com/azoila/openmdm/commit/5d53670c1ab09fbbf330a35ee8dcd0e43e041082), [`d141b72`](https://github.com/azoila/openmdm/commit/d141b72f54ae16b6064e5b12a38ac92ee7d02d18), [`1fa4bee`](https://github.com/azoila/openmdm/commit/1fa4bee350c5934ebb57d6c578bb5106a9853740), [`bd64cd7`](https://github.com/azoila/openmdm/commit/bd64cd711505e8724ead5a76af6a1e8c1449c558)]:
+  - @openmdm/core@0.10.0
+
 ## 0.5.0
 
 ### Minor Changes
