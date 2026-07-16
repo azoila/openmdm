@@ -191,6 +191,29 @@ describe('device convergence (e2e, real Postgres)', () => {
       expect(rows.map((row) => row.device_id)).toEqual([a.id]);
     });
 
+    it('accepts real-world versionNames longer than 50 chars', async () => {
+      // Android versionName has no platform length limit and stock devices
+      // ship apps that exceed the old varchar(50) — Google TTS reports
+      // 'googletts.google-speech-apk_20250804.02_p3.800153222' (53 chars).
+      // With the old width, ONE such app made Postgres reject the insert and
+      // the server 500'd the entire heartbeat, on every heartbeat.
+      const longVersion = 'googletts.google-speech-apk_20250804.02_p3.800153222';
+      const device = await seedDevice();
+
+      await beat(device.id, {
+        installedApps: [
+          { packageName: 'com.google.android.tts', version: longVersion, versionCode: 210582126 },
+          { packageName: 'com.player', version: '1.0.0', versionCode: 1 },
+        ],
+      });
+
+      const apps = await mdm.devices.getApps(device.id);
+      const tts = apps.find((app) => app.packageName === 'com.google.android.tts');
+      expect(tts?.observedVersion).toBe(longVersion);
+      // The well-behaved app must not be collateral damage either.
+      expect(apps).toHaveLength(2);
+    });
+
     it('clears the observed version when an app is uninstalled', async () => {
       const device = await seedDevice();
       await beat(device.id, {

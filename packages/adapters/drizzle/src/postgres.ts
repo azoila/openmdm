@@ -108,7 +108,10 @@ export const mdmDevices = pgTable(
     // Soft-delete tombstone. Retiring a device must not take its command and
     // audit history with it.
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
-    agentVersion: varchar('agent_version', { length: 50 }), // MDM agent version
+    // 255, not 50: Android versionName is a free-form string with no platform
+    // length limit — Google's TTS app ships a 53-char versionName in the wild.
+    // Same rationale for every *version varchar below.
+    agentVersion: varchar('agent_version', { length: 255 }), // MDM agent version
     lastHeartbeat: timestamp('last_heartbeat', { withTimezone: true }),
     lastSync: timestamp('last_sync', { withTimezone: true }),
 
@@ -188,7 +191,7 @@ export const mdmApplications = pgTable(
     tenantId: varchar('tenant_id', { length: 36 }),
     name: varchar('name', { length: 255 }).notNull(),
     packageName: varchar('package_name', { length: 255 }).notNull(),
-    version: varchar('version', { length: 50 }).notNull(),
+    version: varchar('version', { length: 255 }).notNull(),
     versionCode: integer('version_code').notNull(),
     url: text('url').notNull(),
     hash: varchar('hash', { length: 64 }), // SHA-256
@@ -320,13 +323,14 @@ export const mdmDeviceApps = pgTable(
       .references(() => mdmDevices.id, { onDelete: 'cascade' }),
     packageName: varchar('package_name', { length: 255 }).notNull(),
 
-    // Observed: what the device reports.
-    observedVersion: varchar('observed_version', { length: 50 }),
+    // Observed: what the device reports. One oversized versionName must not
+    // reject the entire heartbeat, so this matches the generator's 255.
+    observedVersion: varchar('observed_version', { length: 255 }),
     observedVersionCode: integer('observed_version_code'),
     observedAt: timestamp('observed_at', { withTimezone: true }),
 
     // Desired: what the server wants.
-    desiredVersion: varchar('desired_version', { length: 50 }),
+    desiredVersion: varchar('desired_version', { length: 255 }),
     desiredVersionCode: integer('desired_version_code'),
 
     // Enforcement state.
@@ -473,7 +477,7 @@ export const mdmAppVersions = pgTable(
       .notNull()
       .references(() => mdmApplications.id, { onDelete: 'cascade' }),
     packageName: varchar('package_name', { length: 255 }).notNull(),
-    version: varchar('version', { length: 50 }).notNull(),
+    version: varchar('version', { length: 255 }).notNull(),
     versionCode: integer('version_code').notNull(),
     url: text('url').notNull(),
     hash: varchar('hash', { length: 64 }), // SHA-256
@@ -505,9 +509,9 @@ export const mdmRollbacks = pgTable(
       .notNull()
       .references(() => mdmDevices.id, { onDelete: 'cascade' }),
     packageName: varchar('package_name', { length: 255 }).notNull(),
-    fromVersion: varchar('from_version', { length: 50 }).notNull(),
+    fromVersion: varchar('from_version', { length: 255 }).notNull(),
     fromVersionCode: integer('from_version_code').notNull(),
-    toVersion: varchar('to_version', { length: 50 }).notNull(),
+    toVersion: varchar('to_version', { length: 255 }).notNull(),
     toVersionCode: integer('to_version_code').notNull(),
     reason: text('reason'),
     status: rollbackStatusEnum('status').notNull().default('pending'),
