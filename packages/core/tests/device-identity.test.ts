@@ -1,9 +1,9 @@
 import { createPrivateKey, sign as cryptoSign, generateKeyPairSync } from 'crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
+  ChallengeInvalidError,
   canonicalDeviceRequestMessage,
   canonicalEnrollmentMessage,
-  ChallengeInvalidError,
   InvalidPublicKeyError,
   importPublicKeyFromSpki,
   PublicKeyMismatchError,

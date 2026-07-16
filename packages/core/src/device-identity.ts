@@ -26,8 +26,8 @@
  */
 
 import { createPublicKey, verify as cryptoVerify, type KeyObject } from 'crypto';
-import { MDMError } from './types';
 import type { Device, DeviceIdentityVerification, MDMInstance } from './types';
+import { MDMError } from './types';
 
 // ============================================
 // Low-level: imports and signature verification
