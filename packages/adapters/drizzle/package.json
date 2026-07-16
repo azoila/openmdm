@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/drizzle-adapter",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Drizzle ORM adapter for OpenMDM (PostgreSQL)",
   "author": "OpenMDM Contributors",
   "type": "module",

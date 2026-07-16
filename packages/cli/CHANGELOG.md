@@ -1,5 +1,12 @@
 # @openmdm/cli
 
+## 0.6.2
+
+### Patch Changes
+
+- Updated dependencies [[`72d3cd6`](https://github.com/azoila/openmdm/commit/72d3cd6e515fc2e8e3cafc6c2d4750a4a781622a)]:
+  - @openmdm/core@0.11.1
+
 ## 0.6.1
 
 ### Patch Changes
