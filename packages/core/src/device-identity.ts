@@ -26,6 +26,7 @@
  */
 
 import { createPublicKey, verify as cryptoVerify, type KeyObject } from 'crypto';
+import { MDMError } from './types';
 import type { Device, DeviceIdentityVerification, MDMInstance } from './types';
 
 // ============================================
@@ -272,20 +273,25 @@ export async function verifyDeviceRequest(opts: {
 // ============================================
 // Errors
 // ============================================
+//
+// All three extend MDMError so HTTP adapters map them generically:
+// an error with `code` + `statusCode` becomes a JSON response with
+// that status. As plain Errors they fell through every adapter's
+// error handler and surfaced as HTTP 500 — which turned "your key
+// doesn't match" (a precise, actionable rejection) into "internal
+// server error" on real devices re-enrolling after an app-data wipe.
 
 /**
  * Thrown when a submitted public key cannot be parsed. This is a
  * caller-facing error — the device sent something that is not a
- * well-formed SPKI EC P-256 public key.
+ * well-formed SPKI EC P-256 public key. HTTP 400.
  */
-export class InvalidPublicKeyError extends Error {
-  readonly code = 'INVALID_PUBLIC_KEY';
-
+export class InvalidPublicKeyError extends MDMError {
   constructor(
     message: string,
     public readonly cause?: Error,
   ) {
-    super(message);
+    super(message, 'INVALID_PUBLIC_KEY', 400, cause?.message);
     this.name = 'InvalidPublicKeyError';
   }
 }
@@ -296,29 +302,35 @@ export class InvalidPublicKeyError extends Error {
  *
  * This is the core "device identity continuity" check. The server
  * will NEVER automatically re-pin on mismatch — rebinding a device
- * identity requires an explicit admin action (future work).
+ * identity requires an explicit admin action (future work), which is
+ * why this maps to HTTP 409: the request conflicts with server-side
+ * state and no amount of retrying will change that. A device hitting
+ * this after an app-data wipe (the Keystore pair is regenerated)
+ * needs its old device record removed or reset by an admin.
  */
-export class PublicKeyMismatchError extends Error {
-  readonly code = 'PUBLIC_KEY_MISMATCH';
-
+export class PublicKeyMismatchError extends MDMError {
   constructor(public readonly deviceId: string) {
-    super(`Device ${deviceId} is already enrolled with a different pinned public key`);
+    super(
+      `Device ${deviceId} is already enrolled with a different pinned public key`,
+      'PUBLIC_KEY_MISMATCH',
+      409,
+      { deviceId },
+    );
     this.name = 'PublicKeyMismatchError';
   }
 }
 
 /**
  * Thrown when an enrollment attempts to use a challenge that is
- * missing, expired, or already consumed.
+ * missing, expired, or already consumed. HTTP 400 — the agent
+ * recovers by fetching a fresh challenge and retrying.
  */
-export class ChallengeInvalidError extends Error {
-  readonly code = 'CHALLENGE_INVALID';
-
+export class ChallengeInvalidError extends MDMError {
   constructor(
     message: string,
     public readonly challenge?: string,
   ) {
-    super(message);
+    super(message, 'CHALLENGE_INVALID', 400);
     this.name = 'ChallengeInvalidError';
   }
 }

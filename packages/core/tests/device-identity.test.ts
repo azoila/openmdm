@@ -3,10 +3,13 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import {
   canonicalDeviceRequestMessage,
   canonicalEnrollmentMessage,
+  ChallengeInvalidError,
   InvalidPublicKeyError,
   importPublicKeyFromSpki,
+  PublicKeyMismatchError,
   verifyEcdsaSignature,
 } from '../src/device-identity';
+import { MDMError } from '../src/types';
 
 /**
  * Unit tests for the device-pinned-key identity primitives.
@@ -231,5 +234,39 @@ describe('canonicalDeviceRequestMessage', () => {
     });
     const sig = signWithPrivate(keypair.privateKeyPem, msg);
     expect(verifyEcdsaSignature(keypair.publicKeySpki, msg, sig)).toBe(true);
+  });
+});
+
+describe('identity error HTTP mapping', () => {
+  // These errors cross the HTTP boundary: adapters map anything with
+  // `code` + `statusCode` (i.e. an MDMError) to a JSON response with
+  // that status. As plain Errors they fell through to HTTP 500 — a
+  // device re-enrolling after an app-data wipe saw "Internal server
+  // error" instead of the precise identity-conflict rejection.
+
+  it('PublicKeyMismatchError is a 409 MDMError carrying the device id', () => {
+    const error = new PublicKeyMismatchError('dev-1');
+    expect(error).toBeInstanceOf(MDMError);
+    expect(error.code).toBe('PUBLIC_KEY_MISMATCH');
+    expect(error.statusCode).toBe(409);
+    expect(error.deviceId).toBe('dev-1');
+    expect(error.details).toEqual({ deviceId: 'dev-1' });
+  });
+
+  it('InvalidPublicKeyError is a 400 MDMError', () => {
+    const cause = new Error('bad DER');
+    const error = new InvalidPublicKeyError('cannot parse key', cause);
+    expect(error).toBeInstanceOf(MDMError);
+    expect(error.code).toBe('INVALID_PUBLIC_KEY');
+    expect(error.statusCode).toBe(400);
+    expect(error.cause).toBe(cause);
+  });
+
+  it('ChallengeInvalidError is a 400 MDMError', () => {
+    const error = new ChallengeInvalidError('challenge expired', 'abc');
+    expect(error).toBeInstanceOf(MDMError);
+    expect(error.code).toBe('CHALLENGE_INVALID');
+    expect(error.statusCode).toBe(400);
+    expect(error.challenge).toBe('abc');
   });
 });
