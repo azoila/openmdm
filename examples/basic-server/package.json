@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/example-basic-server",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "description": "Example: embedding OpenMDM in a Hono server",
   "type": "module",
