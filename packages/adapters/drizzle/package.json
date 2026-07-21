@@ -44,7 +44,7 @@
     "drizzle-orm": "^0.45.2",
     "tsup": "^8.0.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.0.0"
+    "vitest": "^4.1.10"
   },
   "peerDependencies": {
     "drizzle-orm": ">=0.30.0"
