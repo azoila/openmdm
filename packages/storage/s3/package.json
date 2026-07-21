@@ -27,8 +27,8 @@
     "lint:fix": "biome check --write ."
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1087.0",
-    "@aws-sdk/s3-request-presigner": "^3.1087.0"
+    "@aws-sdk/client-s3": "^3.1091.0",
+    "@aws-sdk/s3-request-presigner": "^3.1091.0"
   },
   "devDependencies": {
     "tsup": "^8.0.0",

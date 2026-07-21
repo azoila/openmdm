@@ -32,7 +32,7 @@
     "@openmdm/core": "workspace:*"
   },
   "devDependencies": {
-    "hono": "^4.12.30",
+    "hono": "^4.12.31",
     "tsup": "^8.0.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0",
