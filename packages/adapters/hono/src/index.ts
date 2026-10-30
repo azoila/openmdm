@@ -220,6 +220,17 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
   // isn't working — refresh it, don't wipe yourself". Under v1, the
   // legacy 401 is preserved so old fleets keep working during
   // rollout.
+  // A device may only report on its own commands. The same 404 for "not yours"
+  // and "does not exist" avoids confirming that another device's id is real.
+  const ownedCommandId = async (c: Context): Promise<string> => {
+    const commandId = c.req.param('id') as string;
+    const command = await mdm.commands.get(commandId);
+    if (!command || command.deviceId !== c.get('deviceId')) {
+      throw new HTTPException(404, { message: 'Command not found' });
+    }
+    return commandId;
+  };
+
   const deviceAuth: MiddlewareHandler = async (c, next) => {
     const token = c.req.header('Authorization')?.replace('Bearer ', '');
 
@@ -600,14 +611,14 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
 
     // Acknowledge command
     enrollment.post('/commands/:id/ack', deviceAuth, async (c) => {
-      const commandId = c.req.param('id');
+      const commandId = await ownedCommandId(c);
       const command = await mdm.commands.acknowledge(commandId);
       return agentOkResponse(c, command);
     });
 
     // Complete command
     enrollment.post('/commands/:id/complete', deviceAuth, async (c) => {
-      const commandId = c.req.param('id');
+      const commandId = await ownedCommandId(c);
       const body = await c.req.json<{ success: boolean; message?: string; data?: unknown }>();
       const command = await mdm.commands.complete(commandId, body);
       return agentOkResponse(c, command);
@@ -615,7 +626,7 @@ export function honoAdapter(mdm: MDMInstance, options: HonoAdapterOptions = {}):
 
     // Fail command
     enrollment.post('/commands/:id/fail', deviceAuth, async (c) => {
-      const commandId = c.req.param('id');
+      const commandId = await ownedCommandId(c);
       const body = await c.req.json<{ error: string }>();
       const command = await mdm.commands.fail(commandId, body.error);
       return agentOkResponse(c, command);

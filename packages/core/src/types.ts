@@ -642,6 +642,12 @@ export type CommandType =
   | 'updateAgent' // Update MDM agent to a new version
   | 'custom';
 
+/** What a command row must still look like for a transition to apply. */
+export interface CommandTransitionGuard {
+  status: CommandStatus[];
+  attemptCount?: number;
+}
+
 export type CommandStatus =
   | 'pending'
   | 'sent'
@@ -1464,6 +1470,18 @@ export interface DatabaseAdapter {
   listCommands(filter?: CommandFilter): Promise<Command[]>;
   createCommand(data: SendCommandInput): Promise<Command>;
   updateCommand(id: string, data: Partial<Command>): Promise<Command | null>;
+
+  /**
+   * Atomically apply `data` only if the row still matches `expected`. Returns
+   * the updated command, or null when it did not match. Optional for
+   * compatibility; without it core falls back to read-then-write, which does
+   * not protect against concurrent writers.
+   */
+  transitionCommand?(
+    id: string,
+    expected: CommandTransitionGuard,
+    data: Partial<Command>,
+  ): Promise<Command | null>;
   getPendingCommands(deviceId: string): Promise<Command[]>;
 
   /**
