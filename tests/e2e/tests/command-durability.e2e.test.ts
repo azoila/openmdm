@@ -74,6 +74,57 @@ describe('command durability (e2e, real Postgres)', () => {
     return rows[0].count;
   }
 
+  describe('atomic command transitions', () => {
+    it('lets exactly one of 8 racing sweeps claim a delivery attempt', async () => {
+      const command = await adapter.createCommand({ deviceId: 'device-1', type: 'sync' });
+
+      const claims = await Promise.all(
+        Array.from({ length: 8 }, () =>
+          adapter.transitionCommand!(
+            command.id,
+            { status: ['pending'], attemptCount: 0 },
+            { attemptCount: 1 },
+          ),
+        ),
+      );
+
+      expect(claims.filter(Boolean)).toHaveLength(1);
+      expect((await adapter.findCommand(command.id))?.attemptCount).toBe(1);
+    });
+
+    it('lets exactly one of racing complete and requeue win', async () => {
+      const command = await adapter.createCommand({ deviceId: 'device-1', type: 'sync' });
+      await adapter.updateCommand(command.id, { status: 'acknowledged' });
+
+      const [completed, requeued] = await Promise.all([
+        adapter.transitionCommand!(
+          command.id,
+          { status: ['acknowledged'] },
+          { status: 'completed' },
+        ),
+        adapter.transitionCommand!(command.id, { status: ['acknowledged'] }, { status: 'pending' }),
+      ]);
+
+      expect([completed, requeued].filter(Boolean)).toHaveLength(1);
+    });
+
+    it('returns null and writes nothing when the row has moved on', async () => {
+      const command = await adapter.createCommand({ deviceId: 'device-1', type: 'sync' });
+      await adapter.updateCommand(command.id, { status: 'completed' });
+
+      const late = await adapter.transitionCommand!(
+        command.id,
+        { status: ['pending', 'sent'] },
+        { status: 'acknowledged', acknowledgedAt: new Date() },
+      );
+
+      expect(late).toBeNull();
+      const row = await adapter.findCommand(command.id);
+      expect(row?.status).toBe('completed');
+      expect(row?.acknowledgedAt).toBeFalsy();
+    });
+  });
+
   describe('atomic idempotent insert', () => {
     it('inserts once and reports created=true', async () => {
       const result = await adapter.createCommandIdempotent!({

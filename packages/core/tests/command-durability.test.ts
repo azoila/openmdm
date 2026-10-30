@@ -604,3 +604,99 @@ describe('acknowledged-command watchdog', () => {
     expect(disabled.db._commands.get(command.id).status).toBe('acknowledged');
   });
 });
+
+describe('command state machine under repeated and late reports', () => {
+  let stack: ReturnType<typeof buildMDM>;
+  let deviceId: string;
+
+  beforeEach(async () => {
+    stack = buildMDM({ ackTimeoutSeconds: 60, retryBackoffSeconds: 0, defaultMaxAttempts: 3 });
+    deviceId = (await stack.db.createDevice({ model: 'Pixel' })).id;
+  });
+
+  it('a late ack does not reopen a completed command', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    await stack.mdm.commands.acknowledge(command.id);
+    await stack.mdm.commands.complete(command.id, { success: true });
+
+    const handler = vi.fn();
+    stack.mdm.on('command.acknowledged', handler);
+    const late = await stack.mdm.commands.acknowledge(command.id);
+
+    expect(late.status).toBe('completed');
+    expect(handler).not.toHaveBeenCalled();
+    stack.db._commands.get(command.id).acknowledgedAt = new Date(Date.now() - 3600_000);
+    expect((await stack.mdm.commands.sweepStuck()).requeued).toBe(0);
+  });
+
+  it('a repeated complete does not re-emit or overwrite the first result', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    await stack.mdm.commands.complete(command.id, { success: true, message: 'first' });
+
+    const handler = vi.fn();
+    stack.mdm.on('command.completed', handler);
+    const again = await stack.mdm.commands.complete(command.id, {
+      success: true,
+      message: 'second',
+    });
+
+    expect(again.result?.message).toBe('first');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('a late fail does not overwrite a completed command', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    await stack.mdm.commands.complete(command.id, { success: true });
+
+    expect((await stack.mdm.commands.fail(command.id, 'late')).status).toBe('completed');
+  });
+
+  it.each([
+    'expired',
+    'cancelled',
+    'failed',
+  ] as const)('a late complete closes a %s command: the device report is the truth', async (status) => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    stack.db._commands.get(command.id).status = status;
+    stack.db._commands.get(command.id).error = 'gave up';
+
+    const done = await stack.mdm.commands.complete(command.id, { success: true });
+
+    expect(done.status).toBe('completed');
+    expect(done.error).toBeNull();
+  });
+
+  it('cancel leaves a finished command alone', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    await stack.mdm.commands.complete(command.id, { success: true });
+
+    expect((await stack.mdm.commands.cancel(command.id)).status).toBe('completed');
+  });
+
+  it('an ack that beats the push result is not overwritten by sent', async () => {
+    (stack.mdm as any).push.send = async (_deviceId: string, message: any) => {
+      await stack.mdm.commands.acknowledge(message.payload.commandId);
+      return { success: true };
+    };
+
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+
+    expect(stack.db._commands.get(command.id).status).toBe('acknowledged');
+    expect(await stack.mdm.commands.getPending(deviceId)).toHaveLength(0);
+  });
+
+  it('a poll-only device that keeps acking and dying ends up dead-lettered', async () => {
+    (stack.mdm as any).push.send = async () => ({ success: false });
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'installApp' });
+
+    let sweeps = 0;
+    while (stack.db._commands.get(command.id).status !== 'failed' && sweeps < 10) {
+      await stack.mdm.commands.acknowledge(command.id);
+      stack.db._commands.get(command.id).acknowledgedAt = new Date(Date.now() - 120_000);
+      await stack.mdm.commands.sweepStuck();
+      sweeps += 1;
+    }
+
+    expect(stack.db._commands.get(command.id).error).toBe('ACK_TIMEOUT_EXHAUSTED');
+  });
+});

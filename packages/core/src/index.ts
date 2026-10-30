@@ -53,6 +53,8 @@ import type {
   CommandManager,
   CommandResult,
   CommandRetryResult,
+  CommandStatus,
+  CommandTransitionGuard,
   CreateApplicationInput,
   CreateDeviceInput,
   CreateGroupInput,
@@ -436,6 +438,45 @@ export function createMDM(config: MDMConfig): MDMInstance {
   };
 
   /**
+   * The key that signs device tokens. Refuses to sign with an empty key, which
+   * would produce tokens anyone can forge.
+   */
+  const requireTokenSecret = (): string => {
+    const secret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret;
+    if (!secret) {
+      throw new Error(
+        'Device tokens need a signing key: set auth.deviceTokenSecret or enrollment.deviceSecret',
+      );
+    }
+    return secret;
+  };
+
+  /**
+   * Compare-and-set on a command row. Returns the updated command, or null when
+   * the row no longer matches `expected`. Adapters without an atomic
+   * implementation fall back to read-then-write, which is safe from regressions
+   * but not from concurrent writers.
+   */
+  const transitionCommand = async (
+    id: string,
+    expected: CommandTransitionGuard,
+    data: Partial<Command>,
+  ): Promise<Command | null> => {
+    if (database.transitionCommand) {
+      return database.transitionCommand(id, expected, data);
+    }
+    const current = await database.findCommand(id);
+    if (
+      !current ||
+      !expected.status.includes(current.status) ||
+      (expected.attemptCount !== undefined && (current.attemptCount ?? 0) !== expected.attemptCount)
+    ) {
+      return null;
+    }
+    return database.updateCommand(id, data);
+  };
+
+  /**
    * Push a command to its device and record the outcome.
    *
    * Success → `sent`. Failure → the command stays `pending` with an
@@ -447,6 +488,18 @@ export function createMDM(config: MDMConfig): MDMInstance {
    */
   const attemptDelivery = async (command: Command): Promise<Command> => {
     const attemptCount = (command.attemptCount ?? 0) + 1;
+
+    // Claim the attempt before pushing. Two sweeps that picked up the same row
+    // race on this compare-and-set, and only the winner pushes.
+    const claimed = await transitionCommand(
+      command.id,
+      { status: ['pending'], attemptCount: command.attemptCount ?? 0 },
+      { attemptCount },
+    );
+    if (!claimed) {
+      return (await database.findCommand(command.id)) ?? command;
+    }
+
     let pushed = false;
 
     try {
@@ -468,27 +521,27 @@ export function createMDM(config: MDMConfig): MDMInstance {
     }
 
     if (pushed) {
-      const updated = await database.updateCommand(command.id, {
-        status: 'sent',
-        sentAt: new Date(),
-        attemptCount,
-      });
-      return updated ?? command;
+      // A device on a fast push can ack before this write lands. Only `pending`
+      // may become `sent`; otherwise the ack would be overwritten and the
+      // command handed to the device a second time.
+      const updated = await transitionCommand(
+        command.id,
+        { status: ['pending'] },
+        { status: 'sent', sentAt: new Date() },
+      );
+      return updated ?? (await database.findCommand(command.id)) ?? claimed;
     }
 
     const maxAttempts = command.maxAttempts ?? commandDefaults.maxAttempts;
     const exhausted = attemptCount >= maxAttempts;
 
-    const updated = await database.updateCommand(command.id, {
-      attemptCount,
-      ...(exhausted
-        ? {
-            status: 'failed' as const,
-            error: 'DELIVERY_EXHAUSTED',
-            completedAt: new Date(),
-          }
-        : {}),
-    });
+    const updated = exhausted
+      ? await transitionCommand(
+          command.id,
+          { status: ['pending'] },
+          { status: 'failed', error: 'DELIVERY_EXHAUSTED', completedAt: new Date() },
+        )
+      : claimed;
 
     if (exhausted) {
       commandLog.error(
@@ -1367,6 +1420,32 @@ export function createMDM(config: MDMConfig): MDMInstance {
   // Command Manager
   // ============================================
 
+  /**
+   * Apply a lifecycle transition, or return the row untouched when it has
+   * already moved on. Devices repeat acks and reports after every power cut, so
+   * a stale call is normal and must not move a command backwards. `changed` is
+   * false for those calls and their events are not re-emitted.
+   */
+  const settleCommand = async (
+    id: string,
+    from: CommandStatus[],
+    data: Partial<Command>,
+  ): Promise<{ command: Command; changed: boolean }> => {
+    const updated = await transitionCommand(id, { status: from }, data);
+    if (updated) {
+      return { command: updated, changed: true };
+    }
+    const current = await database.findCommand(id);
+    if (!current) {
+      throw new CommandNotFoundError(id);
+    }
+    commandLog.debug(
+      { commandId: id, status: current.status, attempted: data.status },
+      'Ignored command transition: row already moved on',
+    );
+    return { command: current, changed: false };
+  };
+
   const commands: CommandManager = {
     async get(id: string): Promise<Command | null> {
       return database.findCommand(id);
@@ -1382,64 +1461,58 @@ export function createMDM(config: MDMConfig): MDMInstance {
     },
 
     async cancel(id: string): Promise<Command> {
-      const command = await database.updateCommand(id, { status: 'cancelled' });
-      if (!command) {
-        throw new CommandNotFoundError(id);
-      }
+      const { command } = await settleCommand(id, OPEN_COMMAND_STATUSES, { status: 'cancelled' });
       return command;
     },
 
     async acknowledge(id: string): Promise<Command> {
-      const command = await database.updateCommand(id, {
+      const { command, changed } = await settleCommand(id, ['pending', 'sent'], {
         status: 'acknowledged',
         acknowledgedAt: new Date(),
       });
 
-      if (!command) {
-        throw new CommandNotFoundError(id);
-      }
-
-      const device = await database.findDevice(command.deviceId);
-      if (device) {
-        await emit('command.acknowledged', { device, command });
+      if (changed) {
+        const device = await database.findDevice(command.deviceId);
+        if (device) {
+          await emit('command.acknowledged', { device, command });
+        }
       }
 
       return command;
     },
 
     async complete(id: string, result: CommandResult): Promise<Command> {
-      const command = await database.updateCommand(id, {
-        status: 'completed',
-        result,
-        completedAt: new Date(),
-      });
+      // The device's report is the truth about what ran, so a late one still
+      // closes a command the server already gave up on. Only a command that is
+      // already completed stays as it is.
+      const { command, changed } = await settleCommand(
+        id,
+        [...OPEN_COMMAND_STATUSES, 'failed', 'cancelled', 'expired'],
+        { status: 'completed', result, error: null, completedAt: new Date() },
+      );
 
-      if (!command) {
-        throw new CommandNotFoundError(id);
-      }
-
-      const device = await database.findDevice(command.deviceId);
-      if (device) {
-        await emit('command.completed', { device, command, result });
+      if (changed) {
+        const device = await database.findDevice(command.deviceId);
+        if (device) {
+          await emit('command.completed', { device, command, result });
+        }
       }
 
       return command;
     },
 
     async fail(id: string, error: string): Promise<Command> {
-      const command = await database.updateCommand(id, {
+      const { command, changed } = await settleCommand(id, OPEN_COMMAND_STATUSES, {
         status: 'failed',
         error,
         completedAt: new Date(),
       });
 
-      if (!command) {
-        throw new CommandNotFoundError(id);
-      }
-
-      const device = await database.findDevice(command.deviceId);
-      if (device) {
-        await emit('command.failed', { device, command, error });
+      if (changed) {
+        const device = await database.findDevice(command.deviceId);
+        if (device) {
+          await emit('command.failed', { device, command, error });
+        }
       }
 
       return command;
@@ -1470,14 +1543,16 @@ export function createMDM(config: MDMConfig): MDMInstance {
         );
         await Promise.all(
           expired.map((command) =>
-            database
-              .updateCommand(command.id, { status: 'expired', completedAt: new Date() })
-              .catch((error) =>
-                commandLog.error(
-                  { commandId: command.id, err: errorMessage(error) },
-                  'Failed to mark command expired',
-                ),
+            transitionCommand(
+              command.id,
+              { status: ['pending', 'sent'] },
+              { status: 'expired', completedAt: new Date() },
+            ).catch((error) =>
+              commandLog.error(
+                { commandId: command.id, err: errorMessage(error) },
+                'Failed to mark command expired',
               ),
+            ),
           ),
         );
       }
@@ -1568,11 +1643,12 @@ export function createMDM(config: MDMConfig): MDMInstance {
         // Out of attempts: don't spin forever on a device that keeps acking and
         // dying. Dead-letter it so an operator sees it.
         if ((command.attemptCount ?? 0) >= maxAttempts) {
-          await database.updateCommand(command.id, {
-            status: 'failed',
-            error: 'ACK_TIMEOUT_EXHAUSTED',
-            completedAt: new Date(),
-          });
+          const deadLettered = await transitionCommand(
+            command.id,
+            { status: ['acknowledged'] },
+            { status: 'failed', error: 'ACK_TIMEOUT_EXHAUSTED', completedAt: new Date() },
+          );
+          if (!deadLettered) continue;
           result.deadLettered += 1;
           commandLog.error(
             { commandId: command.id, deviceId: command.deviceId },
@@ -1582,10 +1658,20 @@ export function createMDM(config: MDMConfig): MDMInstance {
         }
 
         // Back to pending so the next retryPending() sweep re-pushes it.
-        const requeued = await database.updateCommand(command.id, {
-          status: 'pending',
-          acknowledgedAt: null,
-        });
+        // The requeue counts as an attempt: a device that only polls never goes
+        // through attemptDelivery, and without this a command it keeps acking
+        // and losing would be requeued forever.
+        const requeued = await transitionCommand(
+          command.id,
+          { status: ['acknowledged'] },
+          {
+            status: 'pending',
+            acknowledgedAt: null,
+            attemptCount: (command.attemptCount ?? 0) + 1,
+          },
+        );
+        // The device reported in between the list and this write.
+        if (!requeued) continue;
         result.requeued += 1;
 
         commandLog.warn(
@@ -1594,7 +1680,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
         );
 
         const device = await database.findDevice(command.deviceId);
-        if (device && requeued) {
+        if (device) {
           await emit('command.requeued', {
             device,
             command: requeued,
@@ -2041,7 +2127,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
     }
 
     // Generate JWT token for device auth
-    const tokenSecret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
+    const tokenSecret = requireTokenSecret();
     const tokenExpiration = config.auth?.deviceTokenExpiration || 365 * 24 * 60 * 60;
     const token = generateDeviceToken(device.id, tokenSecret, tokenExpiration);
 
@@ -2244,7 +2330,11 @@ export function createMDM(config: MDMConfig): MDMInstance {
     options?: VerifyDeviceTokenOptions,
   ): Promise<{ deviceId: string } | null> => {
     try {
-      const tokenSecret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
+      const tokenSecret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret;
+      if (!tokenSecret) {
+        // Fail closed: an empty key would verify tokens anyone can forge.
+        return null;
+      }
 
       const parts = token.split('.');
       if (parts.length !== 3) {
@@ -2301,7 +2391,7 @@ export function createMDM(config: MDMConfig): MDMInstance {
       );
     }
 
-    const tokenSecret = config.auth?.deviceTokenSecret || enrollment?.deviceSecret || '';
+    const tokenSecret = requireTokenSecret();
     const tokenExpiration = config.auth?.deviceTokenExpiration || 365 * 24 * 60 * 60;
     const token = generateDeviceToken(device.id, tokenSecret, tokenExpiration);
     return { token, expiresAt: new Date(Date.now() + tokenExpiration * 1000) };
@@ -2720,6 +2810,9 @@ export function verifyEnrollmentSignature(request: EnrollmentRequest, secret: st
     return false;
   }
 }
+
+/** Statuses a command can still leave through the normal lifecycle. */
+const OPEN_COMMAND_STATUSES: CommandStatus[] = ['pending', 'sent', 'acknowledged'];
 
 function generateDeviceToken(deviceId: string, secret: string, expirationSeconds: number): string {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');

@@ -27,6 +27,7 @@ import type {
   AppVersion,
   Command,
   CommandFilter,
+  CommandTransitionGuard,
   CreateApplicationInput,
   CreateAppRollbackInput,
   CreateDeviceInput,
@@ -140,6 +141,27 @@ export interface DrizzleAdapterOptions {
      */
     enrollmentChallenges?: typeof mdmEnrollmentChallenges;
   };
+}
+
+function toCommandUpdate(data: Partial<Command>): Record<string, unknown> {
+  const updateData: Record<string, unknown> = {};
+
+  if (data.status !== undefined) updateData.status = data.status;
+  if (data.result !== undefined) updateData.result = data.result;
+  if (data.error !== undefined) updateData.error = data.error;
+  if (data.sentAt !== undefined) updateData.sentAt = data.sentAt;
+  if (data.acknowledgedAt !== undefined) updateData.acknowledgedAt = data.acknowledgedAt;
+  if (data.completedAt !== undefined) updateData.completedAt = data.completedAt;
+  if (data.expiresAt !== undefined) updateData.expiresAt = data.expiresAt;
+  if (data.maxAttempts !== undefined) updateData.maxAttempts = data.maxAttempts;
+  // Recording the attempt also stamps lastAttemptAt — that timestamp is
+  // what the retry sweep measures backoff against.
+  if (data.attemptCount !== undefined) {
+    updateData.attemptCount = data.attemptCount;
+    updateData.lastAttemptAt = new Date();
+  }
+
+  return updateData;
 }
 
 /**
@@ -1106,26 +1128,31 @@ export function drizzleAdapter(db: DrizzleDB, options: DrizzleAdapterOptions): D
     },
 
     async updateCommand(id: string, data: Partial<Command>): Promise<Command | null> {
-      const updateData: Record<string, unknown> = {};
-
-      if (data.status !== undefined) updateData.status = data.status;
-      if (data.result !== undefined) updateData.result = data.result;
-      if (data.error !== undefined) updateData.error = data.error;
-      if (data.sentAt !== undefined) updateData.sentAt = data.sentAt;
-      if (data.acknowledgedAt !== undefined) updateData.acknowledgedAt = data.acknowledgedAt;
-      if (data.completedAt !== undefined) updateData.completedAt = data.completedAt;
-      if (data.expiresAt !== undefined) updateData.expiresAt = data.expiresAt;
-      if (data.maxAttempts !== undefined) updateData.maxAttempts = data.maxAttempts;
-      // Recording the attempt also stamps lastAttemptAt — that timestamp is
-      // what the retry sweep measures backoff against.
-      if (data.attemptCount !== undefined) {
-        updateData.attemptCount = data.attemptCount;
-        updateData.lastAttemptAt = new Date();
-      }
-
-      await conn().update(commands).set(updateData).where(eq(commands.id, id));
+      await conn().update(commands).set(toCommandUpdate(data)).where(eq(commands.id, id));
 
       return this.findCommand(id);
+    },
+
+    async transitionCommand(
+      id: string,
+      expected: CommandTransitionGuard,
+      data: Partial<Command>,
+    ): Promise<Command | null> {
+      const [row] = await conn()
+        .update(commands)
+        .set(toCommandUpdate(data))
+        .where(
+          and(
+            eq(commands.id, id),
+            inArray(commands.status, expected.status),
+            expected.attemptCount !== undefined
+              ? eq(commands.attemptCount, expected.attemptCount)
+              : undefined,
+          ),
+        )
+        .returning();
+
+      return row ? toCommand(row) : null;
     },
 
     async getPendingCommands(deviceId: string): Promise<Command[]> {
