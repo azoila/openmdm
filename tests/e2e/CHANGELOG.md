@@ -1,5 +1,13 @@
 # @openmdm/tests-e2e
 
+## 0.0.8
+
+### Patch Changes
+
+- Updated dependencies [[`3fb7f0a`](https://github.com/azoila/openmdm/commit/3fb7f0ac4d709f5142a1c4252777add53cea2dc9)]:
+  - @openmdm/core@0.12.0
+  - @openmdm/drizzle-adapter@0.7.0
+
 ## 0.0.7
 
 ### Patch Changes

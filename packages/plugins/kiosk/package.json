@@ -1,6 +1,6 @@
 {
   "name": "@openmdm/plugin-kiosk",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Kiosk mode plugin for OpenMDM - single-app lock down mode for Android devices",
   "author": "OpenMDM Contributors",
   "type": "module",

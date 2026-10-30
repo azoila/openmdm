@@ -1,5 +1,12 @@
 # @openmdm/plugin-kiosk
 
+## 0.3.5
+
+### Patch Changes
+
+- Updated dependencies [[`3fb7f0a`](https://github.com/azoila/openmdm/commit/3fb7f0ac4d709f5142a1c4252777add53cea2dc9)]:
+  - @openmdm/core@0.12.0
+
 ## 0.3.4
 
 ### Patch Changes

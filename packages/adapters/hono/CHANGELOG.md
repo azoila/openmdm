@@ -1,5 +1,23 @@
 # @openmdm/hono
 
+## 1.2.0
+
+### Minor Changes
+
+- [#63](https://github.com/azoila/openmdm/pull/63) [`3fb7f0a`](https://github.com/azoila/openmdm/commit/3fb7f0ac4d709f5142a1c4252777add53cea2dc9) Thanks [@andersonkxiass](https://github.com/andersonkxiass)! - Make command handling safe against repeated and out-of-order device reports.
+
+  - Lifecycle changes are now atomic compare-and-set updates through the new optional `transitionCommand` adapter method. A late ack can no longer reopen a finished command, and an ack that beats the push result is no longer overwritten by `sent`.
+  - A repeated report returns the current row and does not re-emit its event. A late successful `complete` still closes a `failed`, `cancelled` or `expired` command, because the device's report is the truth about what ran; a late `success: false` leaves it closed.
+  - `retryPending` claims each attempt before pushing, so concurrent sweeps can't push the same command twice.
+  - `sweepStuck` counts each requeue as an attempt, so poll-only devices reach `ACK_TIMEOUT_EXHAUSTED` instead of requeuing forever.
+  - Agent command routes now return 404 unless the command belongs to the calling device.
+  - Device tokens can no longer be issued or verified with an empty signing key.
+
+### Patch Changes
+
+- Updated dependencies [[`3fb7f0a`](https://github.com/azoila/openmdm/commit/3fb7f0ac4d709f5142a1c4252777add53cea2dc9)]:
+  - @openmdm/core@0.12.0
+
 ## 1.1.2
 
 ### Patch Changes
