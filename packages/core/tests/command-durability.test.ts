@@ -666,6 +666,18 @@ describe('command state machine under repeated and late reports', () => {
     expect(done.error).toBeNull();
   });
 
+  it('a repeated failure report does not reopen a closed command', async () => {
+    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+    stack.db._commands.get(command.id).status = 'failed';
+
+    const handler = vi.fn();
+    stack.mdm.on('command.completed', handler);
+    const again = await stack.mdm.commands.complete(command.id, { success: false });
+
+    expect(again.status).toBe('failed');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('cancel leaves a finished command alone', async () => {
     const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
     await stack.mdm.commands.complete(command.id, { success: true });

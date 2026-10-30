@@ -1482,12 +1482,15 @@ export function createMDM(config: MDMConfig): MDMInstance {
     },
 
     async complete(id: string, result: CommandResult): Promise<Command> {
-      // The device's report is the truth about what ran, so a late one still
-      // closes a command the server already gave up on. Only a command that is
-      // already completed stays as it is.
+      // The device's report is the truth about what ran, so a late success still
+      // closes a command the server already gave up on. A late failure report
+      // adds nothing to a command that is already closed, and integrators may
+      // reclassify success:false as `failed`, so a repeat must not reopen it.
       const { command, changed } = await settleCommand(
         id,
-        [...OPEN_COMMAND_STATUSES, 'failed', 'cancelled', 'expired'],
+        result.success === false
+          ? OPEN_COMMAND_STATUSES
+          : [...OPEN_COMMAND_STATUSES, 'failed', 'cancelled', 'expired'],
         { status: 'completed', result, error: null, completedAt: new Date() },
       );
 
