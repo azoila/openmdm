@@ -651,20 +651,19 @@ describe('command state machine under repeated and late reports', () => {
     expect((await stack.mdm.commands.fail(command.id, 'late')).status).toBe('completed');
   });
 
-  it.each([
-    'expired',
-    'cancelled',
-    'failed',
-  ] as const)('a late complete closes a %s command: the device report is the truth', async (status) => {
-    const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
-    stack.db._commands.get(command.id).status = status;
-    stack.db._commands.get(command.id).error = 'gave up';
+  it.each(['expired', 'cancelled', 'failed'] as const)(
+    'a late complete closes a %s command: the device report is the truth',
+    async (status) => {
+      const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
+      stack.db._commands.get(command.id).status = status;
+      stack.db._commands.get(command.id).error = 'gave up';
 
-    const done = await stack.mdm.commands.complete(command.id, { success: true });
+      const done = await stack.mdm.commands.complete(command.id, { success: true });
 
-    expect(done.status).toBe('completed');
-    expect(done.error).toBeNull();
-  });
+      expect(done.status).toBe('completed');
+      expect(done.error).toBeNull();
+    },
+  );
 
   it('a repeated failure report does not reopen a closed command', async () => {
     const command = await stack.mdm.devices.sendCommand(deviceId, { type: 'sync' });
